@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | [NodeRename.js](./substore/NodeRename.js) | 探测真实出口并重命名节点 | 国家、ASN、IP 类型与原生/广播信息；[使用文档](./docs/substore.md#noderename) |
 | [CloudRename.js](./substore/CloudRename.js) | 根据名称及元数据重命名节点 | 本地识别地区、线路、等级和倍率；[使用文档](./docs/substore.md#cloudrename) |
-| [Override.js](./mihomo/Override.js) | Mihomo 配置覆写 | powerfullz 基础 + 自定义策略组、国家识别、Emby 与 DNS；[使用文档](./docs/mihomo.md) |
+| [Override.js](./mihomo/Override.js) | Mihomo 配置覆写 | 手动策略组、国家识别、Emby 与自定义 DNS；[使用文档](./docs/mihomo.md) |
 
 可直接复制文件内容，或在支持远程脚本的客户端中使用下列 Raw 链接：
 
@@ -31,11 +31,10 @@ Kosuzu/
 │   │   ├── Emby.js
 │   │   ├── Policies.js       # 策略组、候选出口与规则顺序
 │   │   ├── Regions.js        # 国家与地区识别
+│   │   ├── Settings.js       # 参数、嗅探、TUN 与 Geo 数据
 │   │   └── dns.yaml
-│   └── vendor/powerfullz/    # 上游构建产物和授权声明
-│       ├── convert.js
-│       ├── convert.min.js
-│       └── LICENSE
+│   └── vendor/powerfullz/
+│       └── LICENSE          # 基础规则的来源许可证
 ├── scripts/
 │   ├── build-override.py     # 生成并排版合并覆写
 │   └── requirements.txt      # 构建依赖
@@ -46,7 +45,7 @@ Kosuzu/
 
 ## 更新覆写
 
-修改 `mihomo/src/` 中的策略、地区、Emby 或 DNS 配置，或更新 `mihomo/vendor/powerfullz/` 中的上游文件后，在项目根目录运行：
+修改 `mihomo/src/` 中的策略、地区、运行设置、Emby 或 DNS 配置后，在项目根目录运行：
 
 ```bash
 python -m pip install -r scripts/requirements.txt
@@ -64,6 +63,7 @@ node --check substore/CloudRename.js
 node --check mihomo/src/Emby.js
 node --check mihomo/src/Policies.js
 node --check mihomo/src/Regions.js
+node --check mihomo/src/Settings.js
 node --check mihomo/Override.js
 ```
 

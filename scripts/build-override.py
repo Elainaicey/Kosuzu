@@ -4,7 +4,6 @@ import argparse
 import json
 import re
 from pathlib import Path
-from textwrap import indent
 
 import jsbeautifier
 import yaml
@@ -43,55 +42,26 @@ def render_dns(dns):
     return "\n".join(lines)
 
 
-def render_upstream(source):
-    """Use descriptive upstream names, with a single concise header in the output."""
-    source = re.sub(r"\A\s*/\*![\s\S]*?\*/\s*", "", source, count=1)
-    sections = {
-        "utils": "通用工具",
-        "constants": "地区与分组定义",
-        "args": "参数解析",
-        "proxy_groups": "代理组生成",
-        "node_parser": "节点识别",
-        "rules": "分流规则",
-        "rule_providers": "规则集",
-        "dns": "上游 DNS 与域名嗅探",
-        "tun": "TUN 设置",
-        "selectors": "代理候选列表",
-        "main": "上游配置入口",
-    }
-    for module, label in sections.items():
-        source = source.replace(f"// src/{module}.ts", f"// {label} · src/{module}.ts")
-    return indent(source.strip(), "  ")
-
-
 def build():
-    upstream = (MIHOMO / "vendor/powerfullz/convert.js").read_text(encoding="utf-8-sig")
     cloud = (MIHOMO / "src/Emby.js").read_text(encoding="utf-8-sig")
     regions = (MIHOMO / "src/Regions.js").read_text(encoding="utf-8-sig")
     policies = (MIHOMO / "src/Policies.js").read_text(encoding="utf-8-sig")
+    settings = (MIHOMO / "src/Settings.js").read_text(encoding="utf-8-sig")
     dns_source = (MIHOMO / "src/dns.yaml").read_text(encoding="utf-8-sig")
     data = yaml.safe_load(dns_source)
     if not isinstance(data, dict) or set(data) != {"dns"}:
         raise ValueError("dns.yaml must contain only a top-level dns section")
     if not isinstance(data["dns"], dict):
         raise ValueError("dns.yaml: dns must be an object")
-    # The bundled upstream exports its entry through globalThis.main.
-    # Capture that export privately so it cannot replace the combined entry.
-    if upstream.count("globalThis.main=") + upstream.count("globalThis.main =") != 1:
-        raise ValueError("Upstream export changed; review its entry before rebuilding")
-    if cloud.count("function main(config)") != 1:
-        raise ValueError("Emby.js entry changed; review it before rebuilding")
-    cloud_body = cloud[cloud.index("function main(config)"):].replace(
-        "function main(config)", "function applyCloudOverrides(config)", 1
-    ).strip()
     output = f'''/**
  * Kosuzu · Mihomo 配置覆写
+ * 版本：2026.10.04.1
  *
- * 执行顺序：上游分流 → Emby 补充 → 自定义策略与地区 → 自定义 DNS。
- * DNS 来源：mihomo/src/dns.yaml；不受 fakeip、ipv6 参数影响。
+ * 所有策略组均为 select；由用户选择并保存节点。
+ * DNS 来源：mihomo/src/dns.yaml。
  * 重新生成：python scripts/build-override.py
  *
- * 上游：https://github.com/powerfullz/override-rules
+ * 基础规则参考：https://github.com/powerfullz/override-rules
  * 授权：vendor/powerfullz/LICENSE
  */
 "use strict";
@@ -101,49 +71,69 @@ def build():
 // -----------------------------------------------------------------------------
 
 function main(config) {{
-  const result = applyCloudOverrides(powerfullzOverrideMain(config));
-  applyKosuzuPolicies(result);
-  result.dns = createCustomDns();
-  return result;
+  if (!config || !Array.isArray(config.proxies)) {{
+    throw new Error("[Kosuzu] 配置中缺少有效的 proxies 数组");
+  }}
+  const options = createKosuzuOptions();
+  const hasTailscale = config.proxies.some((node) => node.type === "tailscale");
+  const runtime = createKosuzuRuntime(options, hasTailscale);
+  return {{
+    proxies: config.proxies,
+    ...(config.hosts !== undefined ? {{ hosts: config.hosts }} : {{}}),
+    ...runtime,
+    profile: {{ ...config.profile, ...runtime.profile }},
+    "proxy-groups": createKosuzuGroups(config.proxies, options),
+    "rule-providers": createKosuzuProviders(),
+    rules: createKosuzuRules(options, hasTailscale),
+    dns: createCustomDns(),
+  }};
 }}
 
 // -----------------------------------------------------------------------------
 // 自定义 DNS · mihomo/src/dns.yaml
 // -----------------------------------------------------------------------------
 
-// 每次创建独立对象，完整替换上游 DNS。
+// 每次创建独立对象，完整替换输入配置的 DNS。
 function createCustomDns() {{
 {render_dns(data["dns"])}
 }}
 
 // -----------------------------------------------------------------------------
-// Emby 分组与规则 · mihomo/src/Emby.js
-// -----------------------------------------------------------------------------
-
-{cloud_body}
-
-// -----------------------------------------------------------------------------
-// 自定义策略与国家识别 · mihomo/src/Policies.js、Regions.js
+// 策略组与分流规则 · mihomo/src/Policies.js
 // -----------------------------------------------------------------------------
 
 {policies.strip()}
 
+// -----------------------------------------------------------------------------
+// 国家与地区识别 · mihomo/src/Regions.js
+// -----------------------------------------------------------------------------
+
 {regions.strip()}
 
 // -----------------------------------------------------------------------------
-// 上游分流 · mihomo/vendor/powerfullz/convert.js
+// Emby 规则源 · mihomo/src/Emby.js
 // -----------------------------------------------------------------------------
 
-const powerfullzOverrideMain = (() => {{
-  const globalThis = {{}};
+{cloud.strip()}
 
-{render_upstream(upstream)}
+// -----------------------------------------------------------------------------
+// 运行设置 · mihomo/src/Settings.js
+// -----------------------------------------------------------------------------
 
-  return globalThis.main;
-}})();
-
-globalThis.main = main;
+{settings.strip()}
 '''
+    forbidden = [
+        "url-test", "load-balance", "sticky-sessions", "PROXY_GROUPS",
+        "手动选择", "自动选择", "故障转移", "低倍率节点",
+        "STATIC_RESOURCES", "FINANCE", "BILIBILI", "TRUTH_SOCIAL",
+        "SOGOU_INPUT", "PIKPAK", "EHENTAI", "WEIBO",
+    ]
+    for token in forbidden:
+        if token in output:
+            raise ValueError(f"Unused or automatic policy code remains: {token}")
+    for name in re.findall(r"function ([A-Za-z_$][A-Za-z0-9_$]*)\(", output):
+        if name != "main" and len(re.findall(rf"\b{re.escape(name)}\b", output)) < 2:
+            raise ValueError(f"Unreferenced function: {name}")
     options = jsbeautifier.default_options()
     options.indent_size = 2
     options.indent_chained_methods = True
@@ -162,7 +152,7 @@ if __name__ == "__main__":
     if args.check:
         if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != result:
             raise SystemExit("Override.js is out of date; run python scripts/build-override.py")
-        print("mihomo/Override.js matches upstream + custom policies + regions + DNS")
+        print("mihomo/Override.js matches manual policies + regions + runtime + DNS")
     else:
         OUTPUT.write_text(result, encoding="utf-8", newline="\n")
         print(f"Built {OUTPUT.name}")

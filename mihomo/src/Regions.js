@@ -116,9 +116,7 @@ function kosuzuIdentifyRegion(nodeName) {
   return KOSUZU_REGION_MATCHERS.find((region) => region.codeRegex.test(name))?.name;
 }
 
-function createKosuzuRegionGroups(config, args) {
-  const landing = config["proxy-groups"].some((group) => group.name === "前置代理");
-  const nodes = config.proxies.filter((node) => !landing || node["dialer-proxy"] !== "前置代理");
+function createKosuzuRegionGroups(nodes, options) {
   const buckets = new Map();
   for (const node of nodes) {
     const name = kosuzuIdentifyRegion(node.name);
@@ -127,25 +125,14 @@ function createKosuzuRegionGroups(config, args) {
     buckets.get(name).push(node.name);
   }
 
-  const thresholdValue = Number(args.threshold);
-  const threshold = args.threshold != null && Number.isFinite(thresholdValue)
-    ? Math.max(1, Math.floor(thresholdValue)) : 1;
-  const typeValue = Number(args.grouptype ?? 1);
-  const groupType = [0, 1, 2].includes(typeValue) ? typeValue : 1;
   const groups = KOSUZU_REGIONS.flatMap(([name, code]) => {
     const proxies = [...new Set(buckets.get(name) || [])];
-    if (proxies.length < threshold) return [];
+    if (proxies.length < options.threshold) return [];
     return [{
       name: `${name}节点`,
       icon: `https://flagcdn.com/w80/${code.toLowerCase()}.png`,
-      type: ["select", "url-test", "load-balance"][groupType],
+      type: "select",
       proxies,
-      ...(groupType === 0 ? {} : {
-        url: "https://cp.cloudflare.com",
-        interval: 60,
-        tolerance: 20,
-      }),
-      ...(groupType === 2 ? { strategy: "sticky-sessions" } : {}),
     }];
   });
   const rank = new Map(KOSUZU_REGION_ORDER.map((name, index) => [`${name}节点`, index]));

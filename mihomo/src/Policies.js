@@ -1,125 +1,168 @@
-/** Kosuzu 的策略组、候选出口和规则顺序；上游快照保持独立。 */
-function applyKosuzuPolicies(config) {
-  const args = typeof $arguments === "object" && $arguments ? $arguments : {};
-  const renames = new Map([["手动选择", "备用选择"]]);
-  const replacements = new Map([
-    ["静态资源", "选择代理"],
-    ["金融服务", "选择代理"],
-    ["哔哩哔哩", "DIRECT"],
-    ["Truth Social", "选择代理"],
-    ["搜狗输入法", "DIRECT"],
-    ["PikPak网盘", "选择代理"],
-    ["E-Hentai", "选择代理"],
-    ["新浪微博", "DIRECT"],
-    ["自动选择", "选择代理"],
-    ["故障转移", "选择代理"],
-  ]);
-  const regions = createKosuzuRegionGroups(config, args);
-  const regionNames = regions.map((group) => group.name);
-  const oldRegions = new Set(config["proxy-groups"]
-    .filter((group) => group.name.endsWith("节点") && !["落地节点", "低倍率节点"].includes(group.name))
-    .map((group) => group.name));
-  const groups = config["proxy-groups"].filter((group) =>
-    !replacements.has(group.name) && !oldRegions.has(group.name))
-    .map((group) => ({ ...group, name: renames.get(group.name) || group.name }));
-  groups.push(...regions);
+/** 最终策略组与分流规则：直接生成需要的内容。 */
+const KOSUZU_SERVICES = [
+  // 经常切换出口的 AI 与影音。
+  ["AI服务", "ChatGPT"],
+  ["Emby服", "Emby"],
+  ["Netflix", "Netflix"],
+  ["Youtube", "YouTube"],
+  ["巴哈姆特", "Bahamut", "台湾节点"],
+  ["Twitch", "Twitch"],
+  ["Spotify", "Spotify"],
 
-  const extraGroups = [
-    ["PayPal", "PayPal"],
-    ["游戏平台", "Game"],
-    ["Meta", "Meta"],
-    ["Discord", "Discord"],
-  ];
-  for (const [name, icon] of extraGroups) {
-    groups.push({
-      name,
-      type: "select",
-      icon: name === "Meta"
-        ? "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@main/png/meta.png"
+  // 社交与通信。
+  ["Telegram", "Telegram"],
+  ["Discord", "Discord"],
+  ["Meta", "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@main/png/meta.png"],
+  ["Twitter", "Twitter"],
+  ["TikTok", "TikTok"],
+
+  // 游戏、开发与厂商服务。
+  ["游戏平台", "Game"],
+  ["Xbox", "Xbox"],
+  ["Github", "GitHub"],
+  ["谷歌服务", "Google"],
+  ["微软服务", "Microsoft", "DIRECT"],
+  ["苹果服务", "Apple", "DIRECT"],
+
+  // 支付与加密货币。
+  ["PayPal", "PayPal"],
+  ["加密货币", "Cryptocurrency_1"],
+];
+
+function kosuzuUnique(items) {
+  return [...new Set(items.filter(Boolean))];
+}
+
+function createKosuzuSelect(name, proxies, icon) {
+  return {
+    name,
+    type: "select",
+    proxies: proxies.length ? kosuzuUnique(proxies) : ["DIRECT"],
+    ...(icon ? {
+      icon: icon.startsWith("https://") ? icon
         : `https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/${icon}.png`,
-      proxies: [],
-    });
-  }
+    } : {}),
+  };
+}
 
-  const groupNames = new Set(groups.map((group) => group.name));
-  const unique = (items) => [...new Set(items.filter(Boolean))];
-  const extraExits = ["落地节点", "低倍率节点"].filter((name) => groupNames.has(name));
-  const businessExits = unique(["选择代理", ...regionNames, ...extraExits, "备用选择", "DIRECT"]);
-  const nodeNames = unique(config.proxies.map((node) => node.name));
-  const specialGroups = new Set([
-    ...regionNames, "选择代理", "备用选择", "Final", "GLOBAL",
-    "广告拦截", "前置代理", "落地节点", "低倍率节点", "Tailscale",
-  ]);
-  for (const group of groups) {
-    if (group.name === "选择代理") {
-      group.proxies = unique([...extraExits.filter((name) => name === "落地节点"),
-        ...regionNames, ...extraExits, "备用选择", "DIRECT"]);
-    } else if (group.name === "Final") {
-      // 不引入业务组或 GLOBAL，避免形成相互引用；可直接选任意单节点。
-      group.proxies = unique([...businessExits, ...nodeNames]);
-    } else if (group.name === "前置代理") {
-      const frontNodes = config.proxies.filter((node) => node["dialer-proxy"] !== "前置代理");
-      group.proxies = unique([...regionNames, "DIRECT", ...frontNodes.map((node) => node.name)]);
-    } else if (!specialGroups.has(group.name)) {
-      const first = renames.get(group.proxies?.[0]) || group.proxies?.[0];
-      group.proxies = unique([businessExits.includes(first) ? first : null, ...businessExits]);
-    }
-    if (Array.isArray(group.proxies)) {
-      group.proxies = unique(group.proxies.map((name) => renames.get(name) || replacements.get(name) || name))
-        .filter((name) => name !== group.name &&
-          (!oldRegions.has(name) || groupNames.has(name)));
-      if (group.proxies.length === 0) group.proxies = ["DIRECT"];
-    }
-  }
-
-  // 入口 → 六个常用地区 → AI/媒体 → 社交 → 游戏 → 开发/厂商 → 支付 → 其他地区。
-  const commonRegions = regionNames.filter((name) =>
-    ["美国节点", "香港节点", "日本节点", "新加坡节点", "台湾节点", "韩国节点"].includes(name));
-  const order = [
-    "选择代理", "备用选择", "Final", ...commonRegions,
-    "AI服务", "Emby服", "Netflix", "Youtube", "巴哈姆特", "Twitch", "Spotify",
-    "Telegram", "Discord", "Meta", "Twitter", "TikTok",
-    "游戏平台", "Xbox",
-    "Github", "谷歌服务", "微软服务", "苹果服务",
-    "PayPal", "加密货币",
-    ...regionNames.filter((name) => !commonRegions.includes(name)),
-    "落地节点", "前置代理", "低倍率节点", "Tailscale", "广告拦截", "GLOBAL",
+function createKosuzuGroups(proxies, options) {
+  const landingNodes = proxies.filter((node) => node["dialer-proxy"] === "前置代理");
+  const frontNodes = proxies.filter((node) => node["dialer-proxy"] !== "前置代理");
+  const hasLanding = landingNodes.length > 0;
+  const regions = createKosuzuRegionGroups(hasLanding ? frontNodes : proxies, options);
+  const regionNames = regions.map((group) => group.name);
+  const allNames = kosuzuUnique(proxies.map((node) => node.name));
+  const landingExit = hasLanding ? ["落地节点"] : [];
+  const exits = kosuzuUnique(["选择代理", ...regionNames, ...landingExit, "备用选择", "DIRECT"]);
+  const commonNames = new Set(["美国节点", "香港节点", "日本节点", "新加坡节点", "台湾节点", "韩国节点"]);
+  const groups = [
+    createKosuzuSelect("选择代理", [...landingExit, ...regionNames, "备用选择", "DIRECT"], "Proxy"),
+    createKosuzuSelect("备用选择", allNames, "Available_1"),
+    createKosuzuSelect("Final", [...exits, ...allNames], "Final"),
+    ...regions.filter((group) => commonNames.has(group.name)),
+    ...KOSUZU_SERVICES.map(([name, icon, preferred]) =>
+      createKosuzuSelect(name, exits.includes(preferred) ? [preferred, ...exits] : exits, icon)),
+    ...regions.filter((group) => !commonNames.has(group.name)),
   ];
-  const rank = new Map(order.map((name, index) => [name, index]));
-  groups.sort((a, b) => (rank.get(a.name) ?? 999) - (rank.get(b.name) ?? 999));
-  const globalGroup = groups.find((group) => group.name === "GLOBAL");
-  if (globalGroup) globalGroup.proxies = unique([
-    ...groups.filter((group) => group !== globalGroup).map((group) => group.name), "DIRECT",
-  ]);
-  config["proxy-groups"] = groups;
 
-  const cdnRules = [];
-  let rules = config.rules.map((rule) => {
-    const parts = rule.split(",");
-    const targetIndex = parts.length - (parts[parts.length - 1] === "no-resolve" ? 2 : 1);
-    parts[targetIndex] = renames.get(parts[targetIndex]) || replacements.get(parts[targetIndex]) || parts[targetIndex];
-    return parts.join(",");
-  }).filter((rule) => {
-    if (/^RULE-SET,(StaticResources|CDNResources|AdditionalCDNResources),/.test(rule)) {
-      cdnRules.push(rule);
-      return false;
-    }
-    return rule !== "RULE-SET,SteamFix,DIRECT";
-  });
+  if (hasLanding) {
+    groups.push(
+      createKosuzuSelect("落地节点", landingNodes.map((node) => node.name), "Airport"),
+      createKosuzuSelect("前置代理", [...regionNames, "DIRECT", ...frontNodes.map((node) => node.name)], "Area")
+    );
+  }
+  const tailscaleNodes = proxies.filter((node) => node.type === "tailscale");
+  if (tailscaleNodes.length) {
+    groups.push(createKosuzuSelect("Tailscale", tailscaleNodes.map((node) => node.name),
+      "https://cdn.jsdelivr.net/gh/powerfullz/override-rules@main/icons/Tailscale.png"));
+  }
+  groups.push(createKosuzuSelect("广告拦截", ["REJECT", "REJECT-DROP", "DIRECT"], "AdBlack"));
+  groups.push(createKosuzuSelect("GLOBAL", [...groups.map((group) => group.name), "DIRECT"], "Global"));
+  return groups;
+}
 
-  // 精确服务优先于大分类和 CDN。游戏平台保留国内域名/下载直连，Xbox 单独控制。
-  const serviceIndex = rules.findIndex((rule) => rule.startsWith("GEOSITE,category-cryptocurrency,"));
-  rules.splice(serviceIndex < 0 ? 0 : serviceIndex, 0,
+function createKosuzuProvider(behavior, format, url, filename) {
+  return { type: "http", behavior, format, interval: 86400, url, path: `./ruleset/${filename}` };
+}
+
+function createKosuzuProviders() {
+  const upstream = "https://cdn.jsdelivr.net/gh/powerfullz/override-rules@main/ruleset";
+  const sukka = "https://ruleset.skk.moe/Clash";
+  const text = (name, filename = `${name}.list`) =>
+    createKosuzuProvider("classical", "text", `${upstream}/${filename}`, filename);
+  return {
+    ADBlock: createKosuzuProvider("domain", "yaml",
+      "https://cdn.jsdelivr.net/gh/217heidai/adblockfilters@main/rules/adblockmihomolite.yaml", "ADBlock.yaml"),
+    AdditionalFilter: text("AdditionalFilter"),
+    SogouInput: createKosuzuProvider("classical", "text", `${sukka}/non_ip/sogouinput.txt`, "SogouInput.txt"),
+    TikTok: text("TikTok"),
+    EHentai: text("EHentai"),
+    SteamFix: text("SteamFix"),
+    GoogleFCM: text("GoogleFCM", "FirebaseCloudMessaging.list"),
+    Weibo: text("Weibo"),
+    StaticResources: createKosuzuProvider("domain", "text", `${sukka}/domainset/cdn.txt`, "StaticResources.txt"),
+    CDNResources: createKosuzuProvider("classical", "text", `${sukka}/non_ip/cdn.txt`, "CDNResources.txt"),
+    AdditionalCDNResources: text("AdditionalCDNResources"),
+    GFWList: createKosuzuProvider("domain", "yaml",
+      "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt", "GFWList.yaml"),
+    ...createEmbyProviders(),
+  };
+}
+
+function createKosuzuRules(options, hasTailscale) {
+  return [
+    ...(!options.quic ? ["AND,((DST-PORT,443),(NETWORK,UDP)),REJECT"] : []),
+    ...(hasTailscale ? [
+      "IP-CIDR,100.64.0.0/10,Tailscale,no-resolve",
+      "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale,no-resolve",
+      "DOMAIN-SUFFIX,ts.net,Tailscale",
+    ] : []),
+    "GEOIP,private,DIRECT,no-resolve",
+    "RULE-SET,ADBlock,广告拦截",
+    "RULE-SET,AdditionalFilter,广告拦截",
+
+    // 明确的服务规则优先匹配；没有独立策略组的域名直接指定出口。
+    "RULE-SET,SogouInput,DIRECT",
+    "DOMAIN-SUFFIX,truthsocial.com,选择代理",
     "GEOSITE,paypal,PayPal",
     "GEOSITE,meta,Meta",
     "GEOSITE,discord,Discord",
     "RULE-SET,SteamFix,DIRECT",
-    "GEOSITE,category-games@cn,DIRECT");
-  const xboxIndex = rules.findIndex((rule) => rule.startsWith("GEOSITE,xbox,"));
-  rules.splice(xboxIndex < 0 ? rules.length - 1 : xboxIndex + 1, 0,
-    "GEOSITE,category-games,游戏平台");
-  const fallbackIndex = rules.findIndex((rule) => /^(RULE-SET,GFWList,|GEOIP,cn,|MATCH,)/i.test(rule));
-  rules.splice(fallbackIndex < 0 ? rules.length : fallbackIndex, 0, ...cdnRules);
-  config.rules = unique(rules);
-  return config;
+    "GEOSITE,category-games@cn,DIRECT",
+    "GEOSITE,category-cryptocurrency,加密货币",
+    "GEOSITE,category-finance,选择代理",
+    "GEOSITE,category-ai-!cn,AI服务",
+    "GEOSITE,bilibili,DIRECT",
+    "GEOSITE,youtube,Youtube",
+    "GEOSITE,telegram,Telegram",
+    "GEOIP,telegram,Telegram,no-resolve",
+    "GEOSITE,xbox,Xbox",
+    "GEOSITE,category-games,游戏平台",
+    "GEOSITE,github,Github",
+    "GEOSITE,netflix,Netflix",
+    "GEOSITE,twitch,Twitch",
+    "GEOIP,netflix,Netflix,no-resolve",
+    "GEOSITE,spotify,Spotify",
+    "GEOSITE,bahamut,巴哈姆特",
+    "GEOSITE,pikpak,选择代理",
+    "GEOSITE,twitter,Twitter",
+    "RULE-SET,Weibo,DIRECT",
+    "RULE-SET,EHentai,选择代理",
+    "RULE-SET,TikTok,TikTok",
+    "RULE-SET,GoogleFCM,DIRECT",
+    "GEOSITE,google-play@cn,DIRECT",
+    "GEOSITE,microsoft@cn,DIRECT",
+    "GEOSITE,apple,苹果服务",
+    "GEOSITE,microsoft,微软服务",
+    "GEOSITE,google,谷歌服务",
+    ...createEmbyRules(),
+
+    // CDN 与最后的兜底规则。
+    "RULE-SET,StaticResources,选择代理",
+    "RULE-SET,CDNResources,选择代理",
+    "RULE-SET,AdditionalCDNResources,选择代理",
+    "RULE-SET,GFWList,选择代理",
+    "GEOIP,cn,DIRECT",
+    "MATCH,Final",
+  ];
 }
