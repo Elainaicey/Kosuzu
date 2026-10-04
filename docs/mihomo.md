@@ -48,17 +48,21 @@ DNS 严格使用自定义配置：
 
 新增 PayPal、游戏平台、Meta、Discord。规则使用 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) 的 `paypal`、`category-games`、`meta`、`discord` 分类。游戏平台是游戏相关域名的集合，包含 Steam、Epic、EA、育碧等；`category-games@cn` 和原有 SteamFix 优先直连，Xbox 的独立规则优先于游戏平台大分类。域名分流不等同于游戏加速器。
 
+Meta 使用 [Dashboard Icons 的 Meta 图标](https://github.com/homarr-labs/dashboard-icons/blob/main/png/meta.png)。
+
 具体业务规则优先于静态 CDN；三份静态资源规则保留在 GFWList 之前，统一交给「选择代理」。
 
-Final 可以选择「选择代理」、所有显示的国家组、可用的落地/低倍率组、手动选择、DIRECT，以及订阅中的每个节点。避免加入业务组和 GLOBAL，防止循环引用。
+「备用选择」是原来的「手动选择」，包含订阅中的全部节点。Final 可以选择「选择代理」、所有显示的国家组、可用的落地/低倍率组、备用选择、DIRECT，以及订阅中的每个节点。避免加入业务组和 GLOBAL，防止循环引用。
 
-排列顺序为：选择代理、Final、AI、Emby → 香港/台湾/新加坡/日本/韩国/美国 → 媒体、社交、支付、游戏及厂商服务 → 荷兰等其他地区 → 手动选择、链式代理、广告拦截等辅助组。没有节点的国家组不显示。
+排列顺序为：选择代理、备用选择、Final → 美国/香港/日本/新加坡/台湾/韩国 → AI、Emby、Netflix、Youtube、巴哈姆特、Twitch、Spotify → Telegram、Discord、Meta、Twitter、TikTok → 游戏平台、Xbox → Github、谷歌、微软、苹果 → PayPal、加密货币 → 其他地区 → 链式代理、广告拦截等辅助组。没有节点的国家组不显示。
+
+其他地区优先排列英国、德国、荷兰、加拿大、法国、澳大利亚，然后是欧洲、东南亚等地区。国家排序也用于策略组内的候选列表；具体优先级可在 `Regions.js` 的 `KOSUZU_REGION_ORDER` 中调整。
 
 ### 国家识别
 
 支持 61 个国家与地区，包含荷兰、瑞士、瑞典、挪威、西班牙、意大利、新西兰、巴西、阿联酋等。识别优先级为旗帜 → 国家/城市名称（较长名称优先）→ 独立国家代码，支持 `🇳🇱`、`荷兰`、`Netherlands`、`Amsterdam`、`AMS`、`NL01`、`nl_01` 等写法。`in`、`it`、`no` 等易与普通英文混淆的短代码要求大写或带编号。
 
-识别依据是节点名称，不探测真实出口；名称完全不含地区信息的节点仍可从「手动选择」和 Final 直接选择。链式代理开启时，落地节点不进入前置代理引用的国家组。
+识别依据是节点名称，不探测真实出口；名称完全不含地区信息的节点仍可从「备用选择」和 Final 直接选择。链式代理开启时，落地节点不进入前置代理引用的国家组。
 
 ### 重新生成
 

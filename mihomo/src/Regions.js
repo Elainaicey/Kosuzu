@@ -63,6 +63,16 @@ const KOSUZU_REGIONS = [
   ["肯尼亚", "KE", "肯尼亚|肯尼亞|Kenya|Nairobi|NBO"],
 ];
 
+// 显示顺序与识别表分开维护，调整常用地区不影响名称识别。
+const KOSUZU_REGION_ORDER = [
+  "美国", "香港", "日本", "新加坡", "台湾", "韩国",
+  "英国", "德国", "荷兰", "加拿大", "法国", "澳大利亚",
+  "瑞士", "瑞典", "芬兰", "意大利", "西班牙", "新西兰", "俄罗斯", "土耳其",
+  "马来西亚", "泰国", "越南", "菲律宾", "印度尼西亚", "印度", "澳门", "中国",
+  "爱尔兰", "挪威", "丹麦", "比利时", "奥地利", "波兰", "捷克", "葡萄牙", "卢森堡",
+  "阿联酋", "巴西", "阿根廷", "墨西哥", "南非",
+];
+
 function kosuzuEscapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -122,7 +132,7 @@ function createKosuzuRegionGroups(config, args) {
     ? Math.max(1, Math.floor(thresholdValue)) : 1;
   const typeValue = Number(args.grouptype ?? 1);
   const groupType = [0, 1, 2].includes(typeValue) ? typeValue : 1;
-  return KOSUZU_REGIONS.flatMap(([name, code]) => {
+  const groups = KOSUZU_REGIONS.flatMap(([name, code]) => {
     const proxies = [...new Set(buckets.get(name) || [])];
     if (proxies.length < threshold) return [];
     return [{
@@ -138,4 +148,6 @@ function createKosuzuRegionGroups(config, args) {
       ...(groupType === 2 ? { strategy: "sticky-sessions" } : {}),
     }];
   });
+  const rank = new Map(KOSUZU_REGION_ORDER.map((name, index) => [`${name}节点`, index]));
+  return groups.sort((a, b) => (rank.get(a.name) ?? 999) - (rank.get(b.name) ?? 999));
 }
