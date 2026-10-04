@@ -1,7 +1,7 @@
 /**
  * @Sub-Store-Page
  *
- * NodeRename v1.0.2
+ * NodeRename v1.0.3
  * 高性能落地出口检测与节点重命名脚本
  *
  * 默认输出：
@@ -13,8 +13,6 @@
  * 3. 相同节点配置只探测一次；相同出口 IP 的元数据自动合并、去重和批量查询。
  * 4. 分离“节点配置 -> 出口”和“出口 IP -> 元数据”缓存，修改命名参数不会复用错误标签。
  * 5. 默认使用 ASN 国家快速推测原生/广播；只有缺少 ASN 国家时才请求 RIPE。
- * 6. v1.0.1 升级缓存结构并自动丢弃旧版国家缓存，首次运行会重新探测。
- * 7. v1.0.2 修复 suffix 长原名截掉出口标签，并避免截断 Unicode 代理对。
  *
  * 推荐参数：
  * #concurrency=6&probe_source=auto&geo_source=ipinfo&native_source=auto&node_ttl=6&ttl=72&stale_ttl=168&mode=prefix&dedupe=1&debug=0
@@ -75,7 +73,7 @@
  * 不等同于运营商或数据库的正式“原生 IP”认证。
  */
 
-const SCRIPT_VERSION = "1.0.2";
+const SCRIPT_VERSION = "1.0.3";
 const CACHE_KEY = "node_rename_cache_v1";
 const CACHE_SCHEMA = 2;
 const UNKNOWN = "未知";
@@ -88,12 +86,7 @@ const DEFAULT_TRACE_ENDPOINTS = [
   "https://one.one.one.one/cdn-cgi/trace",
 ];
 const CORE_TARGETS = ["ClashMeta", "Mihomo", "Clash"];
-const FINGERPRINT_IGNORED_KEYS = new Set([
-  "name",
-  "id",
-  "collectionName",
-  "subName",
-]);
+const FINGERPRINT_IGNORED_KEYS = new Set(["name", "id", "collectionName", "subName"]);
 const VENDOR_ALIASES = [
   [/HETZNER/i, "HETZNER"],
   [/AMAZON|AWS/i, "AMAZON"],
@@ -112,6 +105,10 @@ const VENDOR_ALIASES = [
   [/CHINA\s+TELECOM|CTGNET|CHINANET/i, "CHINA TELECOM"],
 ];
 
+// -----------------------------------------------------------------------------
+// 基础解析与参数
+// -----------------------------------------------------------------------------
+
 function safeJson(value, fallback) {
   if (value && typeof value === "object") {
     return value;
@@ -128,6 +125,7 @@ function hours(value) {
 }
 
 function numberArg(value, fallback, min, max) {
+  if (value === undefined || value === null || String(value).trim() === "") return fallback;
   const number = Number(value);
   if (!Number.isFinite(number)) {
     return fallback;
@@ -143,7 +141,9 @@ function boolArg(value, fallback = false) {
 }
 
 function enumArg(value, allowed, fallback) {
-  const normalized = String(value || fallback).trim().toLowerCase();
+  const normalized = String(value || fallback)
+    .trim()
+    .toLowerCase();
   return allowed.includes(normalized) ? normalized : fallback;
 }
 
@@ -167,45 +167,70 @@ function assertResponse(response, label) {
 }
 
 function normalizeCC(value) {
-  const cc = String(value || "").trim().toUpperCase();
+  const cc = String(value || "")
+    .trim()
+    .toUpperCase();
   return /^[A-Z]{2}$/.test(cc) ? cc : "";
 }
 
+// 校验并规范化 IPv4 / IPv6，等价 IPv6 写法共用缓存键。
 function normalizeIp(value) {
-  const ip = String(value || "")
+  let ip = String(value || "")
     .trim()
-    .replace(/^\[|\]$/g, "")
     .toLowerCase();
-  if (!ip || ip.length > 64) {
-    return "";
-  }
+  if (ip.startsWith("[") && ip.endsWith("]")) ip = ip.slice(1, -1);
+  if (!ip || ip.length > 64) return "";
 
+  const ipv4 = (text) => {
+    const parts = text.split(".");
+    return parts.length === 4 &&
+      parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+      ? parts.map(Number)
+      : null;
+  };
+  if (!ip.includes(":")) return ipv4(ip)?.join(".") || "";
   if (ip.includes(".")) {
-    const parts = ip.split(".");
-    if (
-      parts.length === 4 &&
-      parts.every(
-        (part) =>
-          /^\d{1,3}$/.test(part) &&
-          Number(part) >= 0 &&
-          Number(part) <= 255
-      )
-    ) {
-      return parts.map((part) => String(Number(part))).join(".");
-    }
-    if (!ip.includes(":")) {
-      return "";
-    }
+    const offset = ip.lastIndexOf(":") + 1;
+    const parts = ipv4(ip.slice(offset));
+    if (!parts) return "";
+    ip =
+      ip.slice(0, offset) +
+      ((parts[0] << 8) | parts[1]).toString(16) +
+      ":" +
+      ((parts[2] << 8) | parts[3]).toString(16);
   }
 
+  const halves = ip.split("::");
+  if (halves.length > 2) return "";
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves[1] ? halves[1].split(":") : [];
+  const count = left.length + right.length;
   if (
-    ip.includes(":") &&
-    /^[0-9a-f:.]+$/.test(ip) &&
-    (ip.match(/::/g) || []).length <= 1
-  ) {
-    return ip;
+    ![...left, ...right].every((part) => /^[0-9a-f]{1,4}$/.test(part)) ||
+    (halves.length === 1 ? count !== 8 : count >= 8)
+  )
+    return "";
+  const parts = [...left, ...Array(8 - count).fill("0"), ...right].map((part) =>
+    parseInt(part, 16).toString(16),
+  );
+
+  let bestStart = -1;
+  let bestLength = 1;
+  for (let index = 0; index < parts.length;) {
+    if (parts[index] !== "0") {
+      index++;
+      continue;
+    }
+    const start = index;
+    while (parts[index] === "0") index++;
+    if (index - start > bestLength) {
+      bestStart = start;
+      bestLength = index - start;
+    }
   }
-  return "";
+  return bestStart < 0
+    ? parts.join(":")
+    : `${parts.slice(0, bestStart).join(":")}::${parts.slice(bestStart + bestLength).join(":")}`;
 }
 
 function flagEmoji(cc) {
@@ -214,20 +239,14 @@ function flagEmoji(cc) {
     return "🌐";
   }
   const base = 0x1f1e6;
-  return String.fromCodePoint(
-    base + value.charCodeAt(0) - 65,
-    base + value.charCodeAt(1) - 65
-  );
+  return String.fromCodePoint(base + value.charCodeAt(0) - 65, base + value.charCodeAt(1) - 65);
 }
 
 function isFlagOnly(value) {
   const points = Array.from(String(value || "").trim()).map((character) =>
-    character.codePointAt(0)
+    character.codePointAt(0),
   );
-  return (
-    points.length === 2 &&
-    points.every((point) => point >= 0x1f1e6 && point <= 0x1f1ff)
-  );
+  return points.length === 2 && points.every((point) => point >= 0x1f1e6 && point <= 0x1f1ff);
 }
 
 function normalizeProviderName(value) {
@@ -235,11 +254,13 @@ function normalizeProviderName(value) {
   if (!raw) {
     return "";
   }
-  return raw
-    .replace(/[⏳✅❌⭐️]/g, "")
-    .replace(/^[\s|\-_/\\]+|[\s|\-_/\\]+$/g, "")
-    .replace(/\s+/g, " ")
-    .slice(0, 24);
+  return truncateText(
+    raw
+      .replace(/[⏳✅❌⭐️]/g, "")
+      .replace(/^[\s|\-_/\\]+|[\s|\-_/\\]+$/g, "")
+      .replace(/\s+/g, " "),
+    24,
+  );
 }
 
 function vendorShortFromOrg(org, maxLength = 16) {
@@ -264,7 +285,7 @@ function vendorShortFromOrg(org, maxLength = 16) {
   value = value
     .replace(
       /\b(?:INCORPORATED|CORPORATION|COMPANY|LIMITED|HOLDINGS?|TECHNOLOGIES|NETWORKS?|COMMUNICATIONS?|INTERNATIONAL|GMBH|S\.?A\.?|S\.?R\.?L\.?|LLC|LTD|INC|CORP|CO)\b\.?/gi,
-      " "
+      " ",
     )
     .replace(/\bAS\d+\b/gi, " ")
     .replace(/[^A-Za-z0-9\u3400-\u9FFF.\-& ]/g, " ")
@@ -273,6 +294,10 @@ function vendorShortFromOrg(org, maxLength = 16) {
 
   return value ? value.toUpperCase().slice(0, limit) : UNKNOWN_VENDOR;
 }
+
+// -----------------------------------------------------------------------------
+// 数据源字段与分类
+// -----------------------------------------------------------------------------
 
 function ipapiGeoCC(data) {
   return (
@@ -288,11 +313,7 @@ function ipapiAsnCC(data) {
 
 function ipapiOrg(data) {
   return String(
-    data?.asn?.org ||
-      data?.company?.name ||
-      data?.datacenter?.datacenter ||
-      data?.asn?.descr ||
-      ""
+    data?.asn?.org || data?.company?.name || data?.datacenter?.datacenter || data?.asn?.descr || "",
   ).trim();
 }
 
@@ -327,16 +348,12 @@ function mapIpTypeValue(value) {
   }
   if (
     /(?:hosting|hoster|data ?center|datacentre|cloud|colo(?:cation)?|server|cdn|content delivery)/.test(
-      type
+      type,
     )
   ) {
     return "数据中心";
   }
-  if (
-    /(?:^|\s)(?:isp|internet service provider|broadband|telecom|carrier)(?:\s|$)/.test(
-      type
-    )
-  ) {
+  if (/(?:^|\s)(?:isp|internet service provider|broadband|telecom|carrier)(?:\s|$)/.test(type)) {
     return "运营商";
   }
   if (/(?:education|university|academic|school)/.test(type)) {
@@ -371,14 +388,14 @@ function inferIpTypeFromOrganization(data) {
 
   if (
     /(?:hetzner|amazon|aws|google cloud|microsoft azure|digitalocean|cloudflare|akamai|linode|vultr|ovh|oracle cloud|alibaba cloud|tencent cloud|huawei cloud|hosting|hoster|data ?center|datacentre|cloud services?|colo(?:cation)?|server hosting|cdn)/i.test(
-      text
+      text,
     )
   ) {
     return "数据中心";
   }
   if (
     /(?:china telecom|chinanet|china unicom|china mobile|cmcc|cucc|ctgnet|broadband|telecom|telecommunications|internet service provider|fiber|fibre|cable|mobile communications)/i.test(
-      text
+      text,
     )
   ) {
     return "运营商";
@@ -404,10 +421,7 @@ function ipTypeFromIpapi(data) {
   }
   if (
     positiveFlag(
-      data.is_datacenter ??
-        data.is_data_center ??
-        data.datacenter_flag ??
-        data.hosting
+      data.is_datacenter ?? data.is_data_center ?? data.datacenter_flag ?? data.hosting,
     ) ||
     (data.datacenter &&
       typeof data.datacenter === "object" &&
@@ -455,10 +469,8 @@ function summarizeIpapi(data) {
 }
 
 function ipinfoOrgParts(data) {
-  const asObject =
-    data?.as && typeof data.as === "object" ? data.as : {};
-  const asnObject =
-    data?.asn && typeof data.asn === "object" ? data.asn : {};
+  const asObject = data?.as && typeof data.as === "object" ? data.as : {};
+  const asnObject = data?.asn && typeof data.asn === "object" ? data.asn : {};
   const legacyOrg = String(data?.org || "").trim();
   const legacyMatch = legacyOrg.match(/^AS(\d+)\s+(.+)$/i);
   const rawAsn =
@@ -474,7 +486,7 @@ function ipinfoOrgParts(data) {
       asnObject.name ||
       asnObject.org ||
       legacyMatch?.[2] ||
-      legacyOrg
+      legacyOrg,
   ).trim();
   return { asn, org };
 }
@@ -550,10 +562,7 @@ function mergeApiSummary(previous, current) {
     asnCC: current.asnCC || previous.asnCC || "",
     asn: current.asn || previous.asn || "",
     org: current.org || previous.org || "",
-    type:
-      current.type && current.type !== UNKNOWN
-        ? current.type
-        : previous.type || UNKNOWN,
+    type: current.type && current.type !== UNKNOWN ? current.type : previous.type || UNKNOWN,
     source: current.source || previous.source || "ipapi.is",
   };
 }
@@ -601,10 +610,10 @@ function chooseGeoCC(source, ipinfoCC, ipapiCC, traceCC) {
 function isCompleteApiSummary(summary) {
   return Boolean(
     normalizeIp(summary?.ip) &&
-      normalizeCC(summary?.geoCC) &&
-      summary?.org &&
-      summary?.type &&
-      summary.type !== UNKNOWN
+    normalizeCC(summary?.geoCC) &&
+    summary?.org &&
+    summary?.type &&
+    summary.type !== UNKNOWN,
   );
 }
 
@@ -639,18 +648,19 @@ function nativeLabel(geoCC, registrationCC) {
   return geo === registered ? "原生" : "广播";
 }
 
+// -----------------------------------------------------------------------------
+// 节点命名与引用
+// -----------------------------------------------------------------------------
+
 function looksLikeUsage(value) {
-  return /\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB|KiB|T|G|M|K)\b/i.test(
-    String(value || "")
-  );
+  return /\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB|KiB|T|G|M|K)\b/i.test(String(value || ""));
 }
 
 function looksLikeExpire(value) {
   const text = String(value || "");
   return (
-    /(?:\d+\s*(?:D|天|日)|\d+\s*(?:H|时|小时)|到期|过期|expire|剩余)/i.test(
-      text
-    ) && !looksLikeUsage(text)
+    /(?:\d+\s*(?:D|天|日)|\d+\s*(?:H|时|小时)|到期|过期|expire|剩余)/i.test(text) &&
+    !looksLikeUsage(text)
   );
 }
 
@@ -659,9 +669,7 @@ function providerFromNode(proxy, manualProvider) {
     return normalizeProviderName(manualProvider) || UNKNOWN_VENDOR;
   }
 
-  const subscription = normalizeProviderName(
-    proxy?._subDisplayName || proxy?._subName
-  );
+  const subscription = normalizeProviderName(proxy?._subDisplayName || proxy?._subName);
   if (subscription) {
     return subscription;
   }
@@ -691,8 +699,8 @@ function protoLabel(proxy) {
   const network = String(proxy?.network || "").toUpperCase();
   const hasReality = Boolean(
     proxy?.["reality-opts"] ||
-      proxy?.realityOpts ||
-      String(proxy?.flow || "").includes("xtls-rprx")
+    proxy?.realityOpts ||
+    String(proxy?.flow || "").includes("xtls-rprx"),
   );
   const security = hasReality ? "REALITY" : proxy?.tls ? "TLS" : "";
   return [type, network, security].filter(Boolean).join("-") || UNKNOWN_VENDOR;
@@ -736,7 +744,7 @@ function buildName(geo, local, options) {
       .map((value) => String(value || "").trim())
       .filter(Boolean)
       .join(options.separator),
-    options.nameLength
+    options.nameLength,
   );
 }
 
@@ -749,9 +757,7 @@ function applyMode(oldName, tag, mode, nameLength) {
     if (old === tag) {
       return truncateText(tag, nameLength);
     }
-    const prefix = old.endsWith(` ${tag}`)
-      ? old.slice(0, -tag.length - 1)
-      : old;
+    const prefix = old.endsWith(` ${tag}`) ? old.slice(0, -tag.length - 1) : old;
     const available = nameLength - tag.length - 1;
     return available > 0
       ? `${truncateText(prefix, available).trim()} ${tag}`.trim()
@@ -760,11 +766,42 @@ function applyMode(oldName, tag, mode, nameLength) {
   return truncateText(tag, nameLength);
 }
 
+// 名称引用绑定到节点对象，去重完成后再写回最终名称。
+function captureProxyReferences(proxies) {
+  const byName = new Map();
+  const duplicates = new Set();
+  for (const proxy of proxies) {
+    if (!proxy || typeof proxy.name !== "string") continue;
+    if (byName.has(proxy.name)) duplicates.add(proxy.name);
+    byName.set(proxy.name, proxy);
+  }
+  const references = [];
+  for (const proxy of proxies) {
+    for (const key of ["dialer-proxy", "underlying-proxy"]) {
+      const name = proxy?.[key];
+      if (!byName.has(name)) continue; // 外部策略组由最终配置负责。
+      if (duplicates.has(name)) throw new Error(`[重命名] 前置节点名称不唯一：${name}`);
+      references.push({ proxy, key, target: byName.get(name) });
+    }
+  }
+  return references;
+}
+
+function updateProxyReferences(proxies, references) {
+  const retained = new Set(proxies);
+  for (const { proxy, key, target } of references) {
+    if (!retained.has(proxy)) continue;
+    if (!retained.has(target)) throw new Error(`[重命名] 引用的前置节点被过滤：${target.name}`);
+    proxy[key] = target.name;
+  }
+}
+
 function dedupeNames(proxies, nameLength) {
   const used = new Set();
   const counters = new Map();
   for (const proxy of proxies) {
-    const base = truncateText(proxy?.name || "", nameLength);
+    if (!proxy || typeof proxy !== "object") continue;
+    const base = truncateText(proxy.name || "", nameLength);
     if (!used.has(base)) {
       used.add(base);
       counters.set(base, 1);
@@ -777,16 +814,17 @@ function dedupeNames(proxies, nameLength) {
     do {
       count++;
       const suffix = `#${count}`;
-      candidate = `${truncateText(
-        base,
-        Math.max(0, nameLength - suffix.length)
-      )}${suffix}`;
+      candidate = `${truncateText(base, Math.max(0, nameLength - suffix.length))}${suffix}`;
     } while (used.has(candidate));
     counters.set(base, count);
     used.add(candidate);
     proxy.name = candidate;
   }
 }
+
+// -----------------------------------------------------------------------------
+// 探测调度与节点指纹
+// -----------------------------------------------------------------------------
 
 function isApiSufficient(summary, options) {
   if (!normalizeCC(summary?.geoCC)) {
@@ -814,25 +852,10 @@ function mapConvertedOutput(output, groups, target) {
   for (const proxy of output) {
     const match = String(proxy?.name || "").match(/__NR_(\d+)_/);
     const index = match ? Number(match[1]) : -1;
-    if (
-      Number.isInteger(index) &&
-      index >= 0 &&
-      index < groups.length &&
-      !usedIndices.has(index)
-    ) {
+    if (Number.isInteger(index) && index >= 0 && index < groups.length && !usedIndices.has(index)) {
       usedIndices.add(index);
       mapped.push({ group: groups[index], proxy, target });
     }
-  }
-  if (mapped.length === output.length) {
-    return mapped;
-  }
-  if (output.length === groups.length) {
-    return output.map((proxy, index) => ({
-      group: groups[index],
-      proxy,
-      target,
-    }));
   }
   return mapped;
 }
@@ -857,7 +880,7 @@ async function mapLimit(items, limit, task) {
   return output;
 }
 
-function stableSerialize(value, stack = new Set()) {
+function stableSerialize(value, stack = new Set(), root = true) {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }
@@ -867,18 +890,18 @@ function stableSerialize(value, stack = new Set()) {
   stack.add(value);
   let output;
   if (Array.isArray(value)) {
-    output = `[${value.map((item) => stableSerialize(item, stack)).join(",")}]`;
+    output = `[${value.map((item) => stableSerialize(item, stack, false)).join(",")}]`;
   } else {
     const pairs = [];
     for (const key of Object.keys(value).sort()) {
-      if (key.startsWith("_") || FINGERPRINT_IGNORED_KEYS.has(key)) {
+      if (root && (key.startsWith("_") || FINGERPRINT_IGNORED_KEYS.has(key))) {
         continue;
       }
       const child = value[key];
       if (typeof child === "function" || child === undefined) {
         continue;
       }
-      pairs.push(`${JSON.stringify(key)}:${stableSerialize(child, stack)}`);
+      pairs.push(`${JSON.stringify(key)}:${stableSerialize(child, stack, false)}`);
     }
     output = `{${pairs.join(",")}}`;
   }
@@ -886,8 +909,14 @@ function stableSerialize(value, stack = new Set()) {
   return output;
 }
 
-function nodeFingerprint(proxy) {
-  const text = stableSerialize(proxy);
+function nodeFingerprint(proxy, dependencies = new Map()) {
+  let text = stableSerialize(proxy);
+  const seen = new Set([proxy]);
+  for (let parent = dependencies.get(proxy); parent; parent = dependencies.get(parent)) {
+    if (seen.has(parent)) throw new Error("[NodeRename] 链式代理存在循环引用");
+    seen.add(parent);
+    text += stableSerialize(parent);
+  }
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
   for (let index = 0; index < text.length; index++) {
@@ -971,20 +1000,18 @@ function normalizeIpapiBatch(data) {
     return [data];
   }
   if (data && typeof data === "object") {
-    return Object.values(data).filter(
-      (item) => item && typeof item === "object" && item.ip
-    );
+    return Object.values(data).filter((item) => item && typeof item === "object" && item.ip);
   }
   return [];
 }
 
+// -----------------------------------------------------------------------------
+// 缓存
+// -----------------------------------------------------------------------------
+
 function loadCache(store) {
   const raw = safeJson(store.read(CACHE_KEY) || "{}", {});
-  if (
-    raw?.schema === CACHE_SCHEMA &&
-    raw.entries &&
-    typeof raw.entries === "object"
-  ) {
+  if (raw?.schema === CACHE_SCHEMA && raw.entries && typeof raw.entries === "object") {
     return { data: raw, dirty: false };
   }
   return {
@@ -1015,24 +1042,16 @@ function cacheLookup(cache, key, freshTtlMs, staleTtlMs, forceFresh = false) {
   };
 }
 
-function saveCacheEntry(cache, key, value, extra = {}) {
+function saveCacheEntry(cache, key, value) {
   cache.data.entries[key] = {
     ts: Date.now(),
     value,
-    ...extra,
   };
   cache.data.version = SCRIPT_VERSION;
   cache.dirty = true;
 }
 
-function apiCacheLookup(
-  cache,
-  ip,
-  fullTtlMs,
-  partialTtlMs,
-  staleTtlMs,
-  forceFresh = false
-) {
+function apiCacheLookup(cache, ip, fullTtlMs, partialTtlMs, staleTtlMs, forceFresh = false) {
   const entry = cacheEntry(cache, `ip:${ip}`);
   const ttl = isCompleteApiSummary(entry?.value) ? fullTtlMs : partialTtlMs;
   return cacheLookup(cache, `ip:${ip}`, ttl, staleTtlMs, forceFresh);
@@ -1044,9 +1063,7 @@ function saveApiSummary(cache, summary) {
   }
   const previous = cacheEntry(cache, `ip:${summary.ip}`)?.value;
   const merged = mergeApiSummary(previous, summary);
-  saveCacheEntry(cache, `ip:${summary.ip}`, merged, {
-    quality: isCompleteApiSummary(merged) ? "full" : "partial",
-  });
+  saveCacheEntry(cache, `ip:${summary.ip}`, merged);
   if (merged.asn && merged.type && merged.type !== UNKNOWN) {
     const previousAsn = cacheEntry(cache, `asn:${merged.asn}`)?.value || {};
     saveCacheEntry(cache, `asn:${merged.asn}`, {
@@ -1058,20 +1075,8 @@ function saveApiSummary(cache, summary) {
   return merged;
 }
 
-function ipinfoCacheLookup(
-  cache,
-  ip,
-  freshTtlMs,
-  staleTtlMs,
-  forceFresh = false
-) {
-  return cacheLookup(
-    cache,
-    `ipinfo:${ip}`,
-    freshTtlMs,
-    staleTtlMs,
-    forceFresh
-  );
+function ipinfoCacheLookup(cache, ip, freshTtlMs, staleTtlMs, forceFresh = false) {
+  return cacheLookup(cache, `ipinfo:${ip}`, freshTtlMs, staleTtlMs, forceFresh);
 }
 
 function saveIpinfoSummary(cache, summary) {
@@ -1081,14 +1086,11 @@ function saveIpinfoSummary(cache, summary) {
   const key = `ipinfo:${summary.ip}`;
   const previous = cacheEntry(cache, key)?.value;
   const merged = mergeApiSummary(previous, summary);
-  saveCacheEntry(cache, key, merged, { quality: "geo" });
+  saveCacheEntry(cache, key, merged);
   if (merged.asn && (merged.org || merged.type !== UNKNOWN)) {
     const previousAsn = cacheEntry(cache, `asn:${merged.asn}`)?.value || {};
     saveCacheEntry(cache, `asn:${merged.asn}`, {
-      type:
-        merged.type && merged.type !== UNKNOWN
-          ? merged.type
-          : previousAsn.type || UNKNOWN,
+      type: merged.type && merged.type !== UNKNOWN ? merged.type : previousAsn.type || UNKNOWN,
       org: merged.org || previousAsn.org || "",
       source: merged.source || previousAsn.source || "ipinfo",
     });
@@ -1100,10 +1102,7 @@ function pruneCache(cache, maxAgeMs, maxEntries) {
   const entries = Object.entries(cache.data.entries);
   const currentTime = Date.now();
   for (const [key, entry] of entries) {
-    if (
-      !Number.isFinite(Number(entry?.ts)) ||
-      currentTime - Number(entry.ts) > maxAgeMs
-    ) {
+    if (!Number.isFinite(Number(entry?.ts)) || currentTime - Number(entry.ts) > maxAgeMs) {
       delete cache.data.entries[key];
       cache.dirty = true;
     }
@@ -1146,56 +1145,76 @@ function fallbackGeo() {
   };
 }
 
+// -----------------------------------------------------------------------------
+// 临时核心转换
+// -----------------------------------------------------------------------------
+
 function convertForCore(groups, addFailure) {
   if (typeof ProxyUtils === "undefined" || !ProxyUtils?.produce) {
     throw new Error("当前 Sub-Store 环境缺少 ProxyUtils.produce");
   }
-
-  let best = [];
+  const markers = new Map(
+    groups.flatMap((group, index) =>
+      group.names.map((name) => [name, coreMarker(index, group.fingerprint)]),
+    ),
+  );
+  const marked = groups.map((group, index) => {
+    const proxy = { ...group.proxy, name: coreMarker(index, group.fingerprint) };
+    for (const key of ["dialer-proxy", "underlying-proxy"]) {
+      if (markers.has(proxy[key])) proxy[key] = markers.get(proxy[key]);
+      else if (proxy[key] && proxy[key] !== "DIRECT") {
+        addFailure(group.firstIndex, "链式代理探测", "前置策略组不在节点列表中，无法独立探测");
+        return null;
+      }
+    }
+    return proxy;
+  });
+  const converted = new Map();
+  // 转换器会修改嵌套字段，每次尝试均使用独立副本。
+  const produce = (items, target) =>
+    ProxyUtils.produce(JSON.parse(JSON.stringify(items)), target, "internal");
   for (const target of CORE_TARGETS) {
-    const marked = groups.map((group, index) => ({
-      ...group.proxy,
-      name: coreMarker(index, group.fingerprint),
-    }));
     try {
-      const output = ProxyUtils.produce(marked, target, "internal");
-      const partial = mapConvertedOutput(output, groups, target);
-      if (partial.length === groups.length) {
-        return partial;
+      const output = produce(marked.filter(Boolean), target);
+      for (const item of mapConvertedOutput(output, groups, target)) {
+        if (!converted.has(item.group)) converted.set(item.group, item);
       }
-      if (partial.length > best.length) {
-        best = partial;
-      }
+      if (converted.size === marked.filter(Boolean).length) break;
     } catch (error) {
       addFailure(-1, `节点批量转换/${target}`, error);
     }
   }
-
-  const convertedKeys = new Set(best.map((item) => item.group.fingerprint));
-  for (const group of groups) {
-    if (convertedKeys.has(group.fingerprint)) {
-      continue;
-    }
-    let converted = null;
+  for (let index = 0; index < groups.length; index++) {
+    if (!marked[index] || converted.has(groups[index])) continue;
     for (const target of CORE_TARGETS) {
       try {
-        const output = ProxyUtils.produce(
-          [{ ...group.proxy, name: `__NR_SINGLE_${group.fingerprint}` }],
-          target,
-          "internal"
-        );
+        const output = produce([marked[index]], target);
         if (Array.isArray(output) && output[0]) {
-          converted = { group, proxy: output[0], target };
+          output[0].name = marked[index].name;
+          converted.set(groups[index], { group: groups[index], proxy: output[0], target });
           break;
         }
       } catch {}
     }
-    if (converted) {
-      best.push(converted);
-      convertedKeys.add(group.fingerprint);
-    }
   }
-  return best;
+
+  // 前置节点不支持时，一并排除依赖它的节点，避免整个临时核心启动失败。
+  const byName = new Map([...converted.values()].map((item) => [item.proxy.name, item]));
+  const usable = new Map();
+  function canUse(name, visiting = new Set()) {
+    if (name === "DIRECT") return true;
+    if (usable.has(name)) return usable.get(name);
+    if (!byName.has(name) || visiting.has(name)) return false;
+    visiting.add(name);
+    const proxy = byName.get(name).proxy;
+    const ok = ["dialer-proxy", "underlying-proxy"].every(
+      (key) => !proxy[key] || canUse(proxy[key], visiting),
+    );
+    visiting.delete(name);
+    usable.set(name, ok);
+    return ok;
+  }
+  return [...converted.values()].filter((item) => canUse(item.proxy.name));
 }
 
 async function settled(promise) {
@@ -1206,60 +1225,37 @@ async function settled(promise) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// 处理入口
+// -----------------------------------------------------------------------------
+
 async function operator(proxies = []) {
   if (!Array.isArray(proxies) || proxies.length === 0) {
     return Array.isArray(proxies) ? proxies : [];
   }
 
+  const args = typeof $arguments === "object" && $arguments ? $arguments : {};
+  const mode = enumArg(args.mode, ["prefix", "suffix", "off"], "prefix");
+  if (mode === "off") return proxies;
+  if (proxies.some((proxy) => !proxy || typeof proxy !== "object" || Array.isArray(proxy))) {
+    throw new Error("[NodeRename] 节点列表中包含无效对象");
+  }
+  const references = captureProxyReferences(proxies);
+  const dependencies = new Map(references.map(({ proxy, target }) => [proxy, target]));
   const $ = $substore;
-  const args =
-    typeof $arguments === "object" && $arguments ? $arguments : {};
   const startedAt = Date.now();
   const info = (message) => {
-    if (typeof $.info === "function") {
-      $.info(message);
-    } else if (typeof console !== "undefined" && console.log) {
-      console.log(message);
-    }
+    if (typeof $.info === "function") $.info(message);
+    else if (typeof console !== "undefined" && console.log) console.log(message);
   };
-
-  const mode = enumArg(args.mode, ["prefix", "suffix", "off"], "prefix");
-  if (mode === "off") {
-    return proxies;
-  }
 
   const concurrency = numberArg(args.concurrency, 6, 1, 16);
   const batchConcurrency = numberArg(args.batch_concurrency, 2, 1, 4);
-  const ipinfoTimeout = numberArg(
-    args.ipinfo_timeout || args.timeout,
-    4500,
-    800,
-    30000
-  );
-  const traceTimeout = numberArg(
-    args.trace_timeout || args.timeout,
-    4000,
-    800,
-    30000
-  );
-  const apiTimeout = numberArg(
-    args.api_timeout || args.timeout,
-    5500,
-    800,
-    30000
-  );
-  const ripeTimeout = numberArg(
-    args.ripe_timeout || args.timeout,
-    4500,
-    800,
-    30000
-  );
-  const startTimeout = numberArg(
-    args.start_timeout || args.timeout,
-    9000,
-    2000,
-    30000
-  );
+  const ipinfoTimeout = numberArg(args.ipinfo_timeout || args.timeout, 4500, 800, 30000);
+  const traceTimeout = numberArg(args.trace_timeout || args.timeout, 4000, 800, 30000);
+  const apiTimeout = numberArg(args.api_timeout || args.timeout, 5500, 800, 30000);
+  const ripeTimeout = numberArg(args.ripe_timeout || args.timeout, 4500, 800, 30000);
+  const startTimeout = numberArg(args.start_timeout || args.timeout, 9000, 2000, 30000);
   const startDelay = numberArg(args.start_delay, 800, 0, 10000);
   const ttlMs = hours(numberArg(args.ttl, 72, 1, 720));
   const nodeTtlMs = hours(numberArg(args.node_ttl, 6, 0, 168));
@@ -1275,24 +1271,12 @@ async function operator(proxies = []) {
     ? enumArg(args.native_source, ["auto", "asn", "ripe"], "auto")
     : "off";
   const ripeVendorEnabled = boolArg(args.ripe_vendor, true);
-  const probeSource = enumArg(
-    args.probe_source,
-    ["auto", "ipinfo", "ipapi", "cf", "dual"],
-    "auto"
-  );
-  const geoSource = enumArg(
-    args.geo_source,
-    ["ipinfo", "ipapi", "cf", "consensus"],
-    "ipinfo"
-  );
+  const probeSource = enumArg(args.probe_source, ["auto", "ipinfo", "ipapi", "cf", "dual"], "auto");
+  const geoSource = enumArg(args.geo_source, ["ipinfo", "ipapi", "cf", "consensus"], "ipinfo");
   const apiVia = enumArg(args.api_via, ["auto", "direct", "proxy"], "auto");
   const apiKey = String(args.key || "").trim();
   const ipinfoToken = String(args.ipinfo_token || "").trim();
-  const ipinfoApiOption = enumArg(
-    args.ipinfo_api,
-    ["auto", "lite", "legacy"],
-    "auto"
-  );
+  const ipinfoApiOption = enumArg(args.ipinfo_api, ["auto", "lite", "legacy"], "auto");
   const ipinfoApi =
     ipinfoApiOption === "auto"
       ? ipinfoToken
@@ -1303,7 +1287,8 @@ async function operator(proxies = []) {
         : ipinfoApiOption;
   const vendorMaxLength = numberArg(args.vendor_len, 16, 6, 24);
   const nameLength = numberArg(args.name_len, 95, 40, 160);
-  const separator = String(args.separator || "|").slice(0, 3) || "|";
+  const separator =
+    truncateText(String(args.separator || "|").replace(/[\u0000-\u001f\u007f]/g, ""), 3) || "|";
 
   const options = {
     provider: String(args.provider || "").trim(),
@@ -1326,11 +1311,7 @@ async function operator(proxies = []) {
     ? customTraceEndpoints
     : DEFAULT_TRACE_ENDPOINTS;
 
-  const metaProtocol = enumArg(
-    args.http_meta_protocol,
-    ["http", "https"],
-    "http"
-  );
+  const metaProtocol = enumArg(args.http_meta_protocol, ["http", "https"], "http");
   const metaHost = String(args.http_meta_host || "127.0.0.1").trim();
   const metaPort = numberArg(args.http_meta_port, 9876, 1, 65535);
   const metaAuthorization = String(args.http_meta_auth || "").trim();
@@ -1382,9 +1363,7 @@ async function operator(proxies = []) {
   }
 
   function addGeoConflict(index, ip, sources, chosen) {
-    const available = Object.entries(sources).filter(([, cc]) =>
-      normalizeCC(cc)
-    );
+    const available = Object.entries(sources).filter(([, cc]) => normalizeCC(cc));
     if (new Set(available.map(([, cc]) => normalizeCC(cc))).size < 2) {
       return;
     }
@@ -1400,7 +1379,7 @@ async function operator(proxies = []) {
     diagnostics.push(
       `#${index + 1} 国家冲突 IP=${key}: ${available
         .map(([source, cc]) => `${source}=${normalizeCC(cc)}`)
-        .join(", ")}，采用 ${normalizeCC(chosen) || UNKNOWN}`
+        .join(", ")}，采用 ${normalizeCC(chosen) || UNKNOWN}`,
     );
   }
 
@@ -1412,7 +1391,7 @@ async function operator(proxies = []) {
         Cloudflare: trace?.geoCC,
         "ipapi.is": selfApi?.summary?.geoCC,
       },
-      selfApi?.summary?.geoCC || trace?.geoCC
+      selfApi?.summary?.geoCC || trace?.geoCC,
     );
   }
 
@@ -1421,9 +1400,7 @@ async function operator(proxies = []) {
       return;
     }
     diagnostics.push(
-      `#${index + 1} ${source} 类型未识别: ${
-        ipTypeDiagnostic(data) || "接口未返回可用类型字段"
-      }`
+      `#${index + 1} ${source} 类型未识别: ${ipTypeDiagnostic(data) || "接口未返回可用类型字段"}`,
     );
   }
 
@@ -1434,7 +1411,7 @@ async function operator(proxies = []) {
 
   const groupMap = new Map();
   for (let index = 0; index < proxies.length; index++) {
-    const fingerprint = nodeFingerprint(proxies[index]);
+    const fingerprint = nodeFingerprint(proxies[index], dependencies);
     let group = groupMap.get(fingerprint);
     if (!group) {
       group = {
@@ -1443,6 +1420,7 @@ async function operator(proxies = []) {
         proxy: proxies[index],
         firstIndex: index,
         indices: [],
+        names: [],
         detection: null,
         staleDetection: null,
         needsProbe: false,
@@ -1452,6 +1430,7 @@ async function operator(proxies = []) {
       groupMap.set(fingerprint, group);
     }
     group.indices.push(index);
+    group.names.push(proxies[index].name);
   }
 
   const groups = Array.from(groupMap.values());
@@ -1459,13 +1438,7 @@ async function operator(proxies = []) {
   stats.duplicateSaved = proxies.length - groups.length;
 
   for (const group of groups) {
-    const route = cacheLookup(
-      cache,
-      group.key,
-      nodeTtlMs,
-      staleTtlMs,
-      force
-    );
+    const route = cacheLookup(cache, group.key, nodeTtlMs, staleTtlMs, force);
     const cachedDetection = normalizeDetection(route.value);
     if (route.stale && cachedDetection) {
       group.staleDetection = cachedDetection;
@@ -1477,39 +1450,42 @@ async function operator(proxies = []) {
       group.needsProbe = true;
     }
 
-    if (
-      apiVia === "proxy" &&
-      group.detection?.ip &&
-      !apiCacheLookup(
+    if (apiVia === "proxy" && group.detection?.ip) {
+      const lookup = apiCacheLookup(
         cache,
         group.detection.ip,
         ttlMs,
         partialTtlMs,
         staleTtlMs,
-        forceApi
-      ).fresh
-    ) {
-      group.needsCore = true;
+        forceApi,
+      );
+      group.needsCore = !lookup.fresh || !isApiSufficient(lookup.value, options);
     }
     group.needsCore = group.needsCore || group.needsProbe;
   }
 
   let core = null;
-  const coreGroups = groups.filter((group) => group.needsCore);
+  // 缓存命中的前置节点仍可能是待探测落地节点的依赖。
+  const groupsByName = new Map(groups.flatMap((group) => group.names.map((name) => [name, group])));
+  const requiredGroups = new Set(groups.filter((group) => group.needsCore));
+  for (const group of requiredGroups) {
+    for (const key of ["dialer-proxy", "underlying-proxy"]) {
+      const parent = groupsByName.get(group.proxy[key]);
+      if (parent) requiredGroups.add(parent);
+    }
+  }
+  const coreGroups = [...requiredGroups];
   const ipinfoRefreshed = new Set();
+  const apiRefreshed = new Set();
 
   function proxyUrlForPort(port) {
     return `http://${metaHost}:${port}`;
   }
 
   function ipinfoUrl(ip = "") {
-    const target =
-      ipinfoApi === "lite" ? ip || "me" : ip ? `${ip}/json` : "json";
-    const base =
-      ipinfoApi === "lite" ? IPINFO_LITE_URL : IPINFO_LEGACY_URL;
-    const query = ipinfoToken
-      ? `?token=${encodeURIComponent(ipinfoToken)}`
-      : "";
+    const target = ipinfoApi === "lite" ? ip || "me" : ip ? `${ip}/json` : "json";
+    const base = ipinfoApi === "lite" ? IPINFO_LITE_URL : IPINFO_LEGACY_URL;
+    const query = ipinfoToken ? `?token=${encodeURIComponent(ipinfoToken)}` : "";
     return `${base}/${target}${query}`;
   }
 
@@ -1524,7 +1500,7 @@ async function operator(proxies = []) {
           "user-agent": `NodeRename/${SCRIPT_VERSION}`,
         },
       }),
-      label
+      label,
     );
     const data = safeJson(response.body, null);
     if (!data || data.error || data.bogon) {
@@ -1532,13 +1508,10 @@ async function operator(proxies = []) {
         data?.error?.message ||
           data?.error?.title ||
           data?.error ||
-          (data?.bogon ? "返回保留/私有地址" : "返回无效 JSON")
+          (data?.bogon ? "返回保留/私有地址" : "返回无效 JSON"),
       );
     }
-    const summary = summarizeIpinfo(
-      data,
-      ipinfoApi === "lite" ? "ipinfo-lite" : "ipinfo-legacy"
-    );
+    const summary = summarizeIpinfo(data, ipinfoApi === "lite" ? "ipinfo-lite" : "ipinfo-legacy");
     if (!summary || !normalizeCC(summary.geoCC)) {
       throw new Error("未返回有效出口 IP 或国家");
     }
@@ -1570,7 +1543,7 @@ async function operator(proxies = []) {
               "user-agent": `NodeRename/${SCRIPT_VERSION}`,
             },
           }),
-          "Cloudflare Trace"
+          "Cloudflare Trace",
         );
         const trace = parseTraceBody(response.body);
         const ip = normalizeIp(trace.ip);
@@ -1601,7 +1574,7 @@ async function operator(proxies = []) {
           "user-agent": `NodeRename/${SCRIPT_VERSION}`,
         },
       }),
-      "ipapi.is 出口自查"
+      "ipapi.is 出口自查",
     );
     const data = safeJson(response.body, null);
     if (!data || data.error) {
@@ -1630,7 +1603,7 @@ async function operator(proxies = []) {
         },
         body: JSON.stringify(body),
       }),
-      "ipapi.is 批量查询"
+      "ipapi.is 批量查询",
     );
     const data = safeJson(response.body, null);
     if (!data || data.error) {
@@ -1657,10 +1630,7 @@ async function operator(proxies = []) {
     if (proxyUrl) {
       request.proxy = proxyUrl;
     }
-    const response = assertResponse(
-      await $.http.post(request),
-      "ipapi.is 精确查询"
-    );
+    const response = assertResponse(await $.http.post(request), "ipapi.is 精确查询");
     const data = safeJson(response.body, null);
     if (!data || data.error) {
       throw new Error(data?.error || "返回无效 JSON");
@@ -1672,7 +1642,7 @@ async function operator(proxies = []) {
     const response = assertResponse(
       await $.http.get({
         url: `https://stat.ripe.net/data/rir-stats-country/data.json?resource=${encodeURIComponent(
-          ip
+          ip,
         )}&sourceapp=node-rename-v1`,
         timeout: ripeTimeout,
         headers: {
@@ -1680,7 +1650,7 @@ async function operator(proxies = []) {
           "user-agent": `NodeRename/${SCRIPT_VERSION}`,
         },
       }),
-      "RIPE RIR Country"
+      "RIPE RIR Country",
     );
     const data = safeJson(response.body, null);
     if (!data || data.status === "error") {
@@ -1693,7 +1663,7 @@ async function operator(proxies = []) {
     const networkResponse = assertResponse(
       await $.http.get({
         url: `https://stat.ripe.net/data/network-info/data.json?resource=${encodeURIComponent(
-          ip
+          ip,
         )}&sourceapp=node-rename-v1`,
         timeout: ripeTimeout,
         headers: {
@@ -1701,7 +1671,7 @@ async function operator(proxies = []) {
           "user-agent": `NodeRename/${SCRIPT_VERSION}`,
         },
       }),
-      "RIPE Network Info"
+      "RIPE Network Info",
     );
     const network = safeJson(networkResponse.body, null);
     const asn = String(network?.data?.asns?.[0] || "")
@@ -1714,7 +1684,7 @@ async function operator(proxies = []) {
     const overviewResponse = assertResponse(
       await $.http.get({
         url: `https://stat.ripe.net/data/as-overview/data.json?resource=AS${encodeURIComponent(
-          asn
+          asn,
         )}&sourceapp=node-rename-v1`,
         timeout: ripeTimeout,
         headers: {
@@ -1722,7 +1692,7 @@ async function operator(proxies = []) {
           "user-agent": `NodeRename/${SCRIPT_VERSION}`,
         },
       }),
-      "RIPE AS Overview"
+      "RIPE AS Overview",
     );
     const overview = safeJson(overviewResponse.body, null);
     const org = String(overview?.data?.holder || "").trim();
@@ -1755,9 +1725,7 @@ async function operator(proxies = []) {
       const converted = convertForCore(coreGroups, addFailure);
       stats.coreNodes = converted.length;
       stats.unsupported = coreGroups.length - converted.length;
-      const convertedSet = new Set(
-        converted.map((item) => item.group.fingerprint)
-      );
+      const convertedSet = new Set(converted.map((item) => item.group.fingerprint));
       for (const group of coreGroups) {
         if (!convertedSet.has(group.fingerprint) && group.needsProbe) {
           addFailure(group.firstIndex, "节点转换", "当前核心不支持此节点");
@@ -1774,19 +1742,13 @@ async function operator(proxies = []) {
         } else if (probeSource === "ipapi") {
           probeWorst = apiTimeout;
         } else if (probeSource === "dual") {
-          probeWorst = Math.max(
-            apiTimeout,
-            traceEndpoints.length * traceTimeout
-          );
+          probeWorst = Math.max(apiTimeout, traceEndpoints.length * traceTimeout);
         } else {
-          probeWorst =
-            ipinfoTimeout +
-            apiTimeout +
-            traceEndpoints.length * traceTimeout;
+          probeWorst = ipinfoTimeout + apiTimeout + traceEndpoints.length * traceTimeout;
         }
         const coreLifetime = Math.min(
           1800000,
-          Math.max(60000, startDelay + rounds * (probeWorst + 1000) + 10000)
+          Math.max(60000, startDelay + rounds * (probeWorst + 1000) + 10000),
         );
         const response = assertResponse(
           await $.http.post({
@@ -1798,17 +1760,11 @@ async function operator(proxies = []) {
               timeout: coreLifetime,
             }),
           }),
-          "HTTP META Start"
+          "HTTP META Start",
         );
         core = safeJson(response.body, null);
-        if (
-          !core?.pid ||
-          !Array.isArray(core?.ports) ||
-          core.ports.length !== converted.length
-        ) {
-          throw new Error(
-            `启动结果无效：${String(response.body || "").slice(0, 220)}`
-          );
+        if (!core?.pid || !Array.isArray(core?.ports) || core.ports.length !== converted.length) {
+          throw new Error(`启动结果无效：${String(response.body || "").slice(0, 220)}`);
         }
         converted.forEach((item, index) => {
           item.group.proxyUrl = proxyUrlForPort(core.ports[index]);
@@ -1886,19 +1842,13 @@ async function operator(proxies = []) {
                 stats.selfOk++;
               } else {
                 stats.selfFail++;
-                addFailure(
-                  group.firstIndex,
-                  "ipapi.is 出口自查",
-                  selfResult.error
-                );
+                addFailure(group.firstIndex, "ipapi.is 出口自查", selfResult.error);
               }
               if (
                 trace &&
                 selfApi &&
                 (trace.ip !== selfApi.summary.ip ||
-                  (trace.geoCC &&
-                    selfApi.summary.geoCC &&
-                    trace.geoCC !== selfApi.summary.geoCC))
+                  (trace.geoCC && selfApi.summary.geoCC && trace.geoCC !== selfApi.summary.geoCC))
               ) {
                 addConflict(group.firstIndex, trace, selfApi);
               }
@@ -1915,11 +1865,7 @@ async function operator(proxies = []) {
               saveIpinfoSummary(cache, selfIpinfo.summary);
               ipinfoRefreshed.add(selfIpinfo.summary.ip);
               if (selfIpinfo.summary.type === UNKNOWN) {
-                logUnknownType(
-                  group.firstIndex,
-                  "IPinfo 出口自查",
-                  selfIpinfo.raw
-                );
+                logUnknownType(group.firstIndex, "IPinfo 出口自查", selfIpinfo.raw);
               }
             } else if (selfApi) {
               const sameIp = trace?.ip === selfApi.summary.ip;
@@ -1931,12 +1877,9 @@ async function operator(proxies = []) {
                 source: "ipapi.is-self",
               };
               saveApiSummary(cache, selfApi.summary);
+              apiRefreshed.add(selfApi.summary.ip);
               if (selfApi.summary.type === UNKNOWN) {
-                logUnknownType(
-                  group.firstIndex,
-                  "ipapi.is 出口自查",
-                  selfApi.raw
-                );
+                logUnknownType(group.firstIndex, "ipapi.is 出口自查", selfApi.raw);
               }
             } else if (trace) {
               group.detection = {
@@ -1949,11 +1892,9 @@ async function operator(proxies = []) {
             }
 
             if (group.detection) {
-              saveCacheEntry(cache, group.key, group.detection, {
-                quality: "full",
-              });
+              saveCacheEntry(cache, group.key, group.detection);
             }
-          }
+          },
         );
       }
     } catch (error) {
@@ -1993,7 +1934,7 @@ async function operator(proxies = []) {
         ip,
         ttlMs,
         staleTtlMs,
-        forceApi && !ipinfoRefreshed.has(ip)
+        forceApi && !ipinfoRefreshed.has(ip),
       );
       if (lookup.fresh) {
         if (!ipinfoRefreshed.has(ip)) {
@@ -2004,24 +1945,16 @@ async function operator(proxies = []) {
       }
     }
 
-    await mapLimit(
-      ipinfoMissing,
-      Math.min(concurrency, 6),
-      async (ip) => {
-        try {
-          const result = await exactIpinfo(ip);
-          saveIpinfoSummary(cache, result.summary);
-          ipinfoRefreshed.add(ip);
-          stats.ipinfoExact++;
-        } catch (error) {
-          addFailure(
-            detectionByIp.get(ip)?.firstIndex || 0,
-            "IPinfo 精确查询",
-            error
-          );
-        }
+    await mapLimit(ipinfoMissing, Math.min(concurrency, 6), async (ip) => {
+      try {
+        const result = await exactIpinfo(ip);
+        saveIpinfoSummary(cache, result.summary);
+        ipinfoRefreshed.add(ip);
+        stats.ipinfoExact++;
+      } catch (error) {
+        addFailure(detectionByIp.get(ip)?.firstIndex || 0, "IPinfo 精确查询", error);
       }
-    );
+    });
   }
 
   try {
@@ -2033,7 +1966,7 @@ async function operator(proxies = []) {
         ttlMs,
         partialTtlMs,
         staleTtlMs,
-        forceApi
+        forceApi && !apiRefreshed.has(ip),
       );
       if (lookup.fresh && isApiSufficient(lookup.value, options)) {
         stats.apiCache++;
@@ -2042,7 +1975,6 @@ async function operator(proxies = []) {
       }
     }
 
-    const apiRefreshed = new Set();
     if (apiMissing.length && apiVia !== "proxy") {
       const chunks = [];
       for (let offset = 0; offset < apiMissing.length; offset += 100) {
@@ -2063,79 +1995,44 @@ async function operator(proxies = []) {
             stats.apiBatchResults++;
             if (summary.type === UNKNOWN) {
               const detection = detectionByIp.get(summary.ip);
-              logUnknownType(
-                detection?.firstIndex || 0,
-                "ipapi.is 批量查询",
-                data
-              );
+              logUnknownType(detection?.firstIndex || 0, "ipapi.is 批量查询", data);
             }
           }
         } catch (error) {
           for (const ip of chunk) {
-            addFailure(
-              detectionByIp.get(ip)?.firstIndex || 0,
-              "ipapi.is 批量查询",
-              error
-            );
+            addFailure(detectionByIp.get(ip)?.firstIndex || 0, "ipapi.is 批量查询", error);
           }
         }
       });
     }
 
     const exactMissing = apiMissing.filter((ip) => {
-      const lookup = apiCacheLookup(
-        cache,
-        ip,
-        ttlMs,
-        partialTtlMs,
-        staleTtlMs,
-        false
-      );
-      return (
-        !apiRefreshed.has(ip) ||
-        !lookup.fresh ||
-        !isApiSufficient(lookup.value, options)
-      );
+      const lookup = apiCacheLookup(cache, ip, ttlMs, partialTtlMs, staleTtlMs, false);
+      return !apiRefreshed.has(ip) || !lookup.fresh || !isApiSufficient(lookup.value, options);
     });
 
-    await mapLimit(
-      exactMissing,
-      Math.min(concurrency, 6),
-      async (ip) => {
-        const detection = detectionByIp.get(ip);
-        const proxyUrl = apiVia === "proxy" ? detection?.proxyUrl || "" : "";
-        if (apiVia === "proxy" && !proxyUrl) {
-          addFailure(
-            detection?.firstIndex || 0,
-            "ipapi.is 精确查询",
-            "没有可用的 HTTP META 端口"
-          );
-          return;
-        }
-        try {
-          const data = await exactIpapi(ip, proxyUrl);
-          const summary = summarizeIpapi(data);
-          if (!summary || summary.ip !== ip) {
-            throw new Error("返回 IP 与查询 IP 不一致");
-          }
-          saveApiSummary(cache, summary);
-          stats.apiExact++;
-          if (summary.type === UNKNOWN) {
-            logUnknownType(
-              detection?.firstIndex || 0,
-              "ipapi.is 精确查询",
-              data
-            );
-          }
-        } catch (error) {
-          addFailure(
-            detection?.firstIndex || 0,
-            "ipapi.is 精确查询",
-            error
-          );
-        }
+    await mapLimit(exactMissing, Math.min(concurrency, 6), async (ip) => {
+      const detection = detectionByIp.get(ip);
+      const proxyUrl = apiVia === "proxy" ? detection?.proxyUrl || "" : "";
+      if (apiVia === "proxy" && !proxyUrl) {
+        addFailure(detection?.firstIndex || 0, "ipapi.is 精确查询", "没有可用的 HTTP META 端口");
+        return;
       }
-    );
+      try {
+        const data = await exactIpapi(ip, proxyUrl);
+        const summary = summarizeIpapi(data);
+        if (!summary || summary.ip !== ip) {
+          throw new Error("返回 IP 与查询 IP 不一致");
+        }
+        saveApiSummary(cache, summary);
+        stats.apiExact++;
+        if (summary.type === UNKNOWN) {
+          logUnknownType(detection?.firstIndex || 0, "ipapi.is 精确查询", data);
+        }
+      } catch (error) {
+        addFailure(detection?.firstIndex || 0, "ipapi.is 精确查询", error);
+      }
+    });
   } catch (error) {
     addFailure(-1, "IP 元数据阶段", error);
   } finally {
@@ -2144,14 +2041,7 @@ async function operator(proxies = []) {
 
   const apiByIp = new Map();
   for (const ip of uniqueIps) {
-    const lookup = apiCacheLookup(
-      cache,
-      ip,
-      ttlMs,
-      partialTtlMs,
-      staleTtlMs,
-      false
-    );
+    const lookup = apiCacheLookup(cache, ip, ttlMs, partialTtlMs, staleTtlMs, false);
     if (lookup.value && (lookup.fresh || lookup.stale)) {
       apiByIp.set(ip, lookup.value);
     }
@@ -2159,13 +2049,7 @@ async function operator(proxies = []) {
 
   const ipinfoByIp = new Map();
   for (const ip of uniqueIps) {
-    const lookup = ipinfoCacheLookup(
-      cache,
-      ip,
-      ttlMs,
-      staleTtlMs,
-      false
-    );
+    const lookup = ipinfoCacheLookup(cache, ip, ttlMs, staleTtlMs, false);
     if (lookup.value && (lookup.fresh || lookup.stale)) {
       ipinfoByIp.set(ip, lookup.value);
     }
@@ -2176,23 +2060,14 @@ async function operator(proxies = []) {
     for (const ip of uniqueIps) {
       const api = apiByIp.get(ip);
       const ipinfo = ipinfoByIp.get(ip);
-      if (
-        nativeSource === "auto" &&
-        normalizeCC(api?.asnCC || ipinfo?.asnCC)
-      ) {
+      if (nativeSource === "auto" && normalizeCC(api?.asnCC || ipinfo?.asnCC)) {
         stats.nativeFast++;
         continue;
       }
       if (nativeSource === "asn") {
         continue;
       }
-      const lookup = cacheLookup(
-        cache,
-        `rir:${ip}`,
-        ttlMs,
-        staleTtlMs,
-        forceApi
-      );
+      const lookup = cacheLookup(cache, `rir:${ip}`, ttlMs, staleTtlMs, forceApi);
       if (!lookup.fresh) {
         rirNeeded.push(ip);
       }
@@ -2205,13 +2080,7 @@ async function operator(proxies = []) {
       if (apiByIp.get(ip)?.org || ipinfoByIp.get(ip)?.org) {
         continue;
       }
-      const lookup = cacheLookup(
-        cache,
-        `vendor:${ip}`,
-        ttlMs,
-        staleTtlMs,
-        forceApi
-      );
+      const lookup = cacheLookup(cache, `vendor:${ip}`, ttlMs, staleTtlMs, forceApi);
       if (!lookup.fresh) {
         vendorNeeded.push(ip);
       }
@@ -2228,11 +2097,7 @@ async function operator(proxies = []) {
         saveCacheEntry(cache, `rir:${ip}`, cc);
         stats.ripeCountry++;
       } catch (error) {
-        addFailure(
-          detectionByIp.get(ip)?.firstIndex || 0,
-          "RIPE 注册国家",
-          error
-        );
+        addFailure(detectionByIp.get(ip)?.firstIndex || 0, "RIPE 注册国家", error);
       }
     }),
     mapLimit(vendorNeeded, Math.min(concurrency, 4), async (ip) => {
@@ -2241,11 +2106,7 @@ async function operator(proxies = []) {
         saveCacheEntry(cache, `vendor:${ip}`, vendor);
         stats.ripeVendor++;
       } catch (error) {
-        addFailure(
-          detectionByIp.get(ip)?.firstIndex || 0,
-          "RIPE ASN 商家",
-          error
-        );
+        addFailure(detectionByIp.get(ip)?.firstIndex || 0, "RIPE ASN 商家", error);
       }
     }),
   ]);
@@ -2254,63 +2115,28 @@ async function operator(proxies = []) {
     let geo = null;
     const detection = group.detection;
     if (detection?.ip) {
-      const apiLookup = apiCacheLookup(
-        cache,
-        detection.ip,
-        ttlMs,
-        partialTtlMs,
-        staleTtlMs,
-        false
-      );
-      const api =
-        apiLookup.value && (apiLookup.fresh || apiLookup.stale)
-          ? apiLookup.value
-          : null;
+      const apiLookup = apiCacheLookup(cache, detection.ip, ttlMs, partialTtlMs, staleTtlMs, false);
+      const api = apiLookup.value && (apiLookup.fresh || apiLookup.stale) ? apiLookup.value : null;
       const ipinfo = ipinfoByIp.get(detection.ip) || null;
-      const vendorLookup = cacheLookup(
-        cache,
-        `vendor:${detection.ip}`,
-        ttlMs,
-        staleTtlMs,
-        false
-      );
+      const vendorLookup = cacheLookup(cache, `vendor:${detection.ip}`, ttlMs, staleTtlMs, false);
       const ripeVendor =
         vendorLookup.value && (vendorLookup.fresh || vendorLookup.stale)
           ? vendorLookup.value
           : null;
-      const asn = String(
-        api?.asn || ipinfo?.asn || ripeVendor?.asn || ""
-      ).replace(/^AS/i, "");
+      const asn = String(api?.asn || ipinfo?.asn || ripeVendor?.asn || "").replace(/^AS/i, "");
       const asnLookup = asn
         ? cacheLookup(cache, `asn:${asn}`, ttlMs, staleTtlMs, false)
         : { value: null, fresh: false, stale: false };
       const asnInfo =
-        asnLookup.value && (asnLookup.fresh || asnLookup.stale)
-          ? asnLookup.value
-          : null;
-      const rirLookup = cacheLookup(
-        cache,
-        `rir:${detection.ip}`,
-        ttlMs,
-        staleTtlMs,
-        false
-      );
+        asnLookup.value && (asnLookup.fresh || asnLookup.stale) ? asnLookup.value : null;
+      const rirLookup = cacheLookup(cache, `rir:${detection.ip}`, ttlMs, staleTtlMs, false);
       const rirCC =
-        rirLookup.value && (rirLookup.fresh || rirLookup.stale)
-          ? normalizeCC(rirLookup.value)
-          : "";
+        rirLookup.value && (rirLookup.fresh || rirLookup.stale) ? normalizeCC(rirLookup.value) : "";
 
-      const ipinfoCC = normalizeCC(
-        ipinfo?.geoCC || detection.ipinfoCC
-      );
+      const ipinfoCC = normalizeCC(ipinfo?.geoCC || detection.ipinfoCC);
       const apiCC = normalizeCC(api?.geoCC || detection.apiCC);
       const traceCC = normalizeCC(detection.traceCC);
-      const geoCC = chooseGeoCC(
-        geoSource,
-        ipinfoCC,
-        apiCC,
-        traceCC
-      );
+      const geoCC = chooseGeoCC(geoSource, ipinfoCC, apiCC, traceCC);
       addGeoConflict(
         group.firstIndex,
         detection.ip,
@@ -2319,7 +2145,7 @@ async function operator(proxies = []) {
           "ipapi.is": apiCC,
           Cloudflare: traceCC,
         },
-        geoCC
+        geoCC,
       );
       const registrationCC =
         nativeSource === "ripe"
@@ -2327,8 +2153,7 @@ async function operator(proxies = []) {
           : nativeSource === "asn"
             ? normalizeCC(api?.asnCC || ipinfo?.asnCC)
             : normalizeCC(api?.asnCC || ipinfo?.asnCC) || rirCC;
-      const org =
-        api?.org || ipinfo?.org || ripeVendor?.org || asnInfo?.org || "";
+      const org = api?.org || ipinfo?.org || ripeVendor?.org || asnInfo?.org || "";
       const type =
         api?.type && api.type !== UNKNOWN
           ? api.type
@@ -2341,15 +2166,11 @@ async function operator(proxies = []) {
         geoCC,
         vendor: vendorShortFromOrg(org, vendorMaxLength),
         type,
-        native:
-          !shouldResolveNative
-            ? UNKNOWN
-            : nativeLabel(geoCC, registrationCC),
+        native: !shouldResolveNative ? UNKNOWN : nativeLabel(geoCC, registrationCC),
       };
-    } else if (markFail) {
-      geo = fallbackGeo();
     } else {
       stats.failed += group.indices.length;
+      if (markFail) geo = fallbackGeo();
     }
 
     if (!geo) {
@@ -2357,12 +2178,7 @@ async function operator(proxies = []) {
     }
     for (const index of group.indices) {
       const tag = buildName(geo, locals[index], options);
-      proxies[index].name = applyMode(
-        proxies[index].name,
-        tag,
-        mode,
-        nameLength
-      );
+      proxies[index].name = applyMode(proxies[index].name, tag, mode, nameLength);
     }
   }
 
@@ -2370,11 +2186,9 @@ async function operator(proxies = []) {
     dedupeNames(proxies, nameLength);
   }
 
-  pruneCache(
-    cache,
-    Math.max(staleTtlMs, ttlMs, hours(720)),
-    cacheMaxEntries
-  );
+  updateProxyReferences(proxies, references);
+
+  pruneCache(cache, Math.max(staleTtlMs, ttlMs, hours(720)), cacheMaxEntries);
   if (cache.dirty) {
     try {
       $.write(JSON.stringify(cache.data), CACHE_KEY);
@@ -2398,17 +2212,13 @@ async function operator(proxies = []) {
         `批量结果=${stats.apiBatchResults}, 精确查询=${stats.apiExact}, ` +
         `ASN国家直用=${stats.nativeFast}, RIPE国家=${stats.ripeCountry}, ` +
         `RIPE商家=${stats.ripeVendor}, 失败=${stats.failed}, ` +
-        `耗时=${Date.now() - startedAt}ms`
+        `耗时=${Date.now() - startedAt}ms`,
     );
     if (diagnostics.length) {
-      info(
-        `[NodeRename ${SCRIPT_VERSION}] 诊断：\n${diagnostics.join("\n")}`
-      );
+      info(`[NodeRename ${SCRIPT_VERSION}] 诊断：\n${diagnostics.join("\n")}`);
     }
     if (failures.length) {
-      info(
-        `[NodeRename ${SCRIPT_VERSION}] 失败明细：\n${failures.join("\n")}`
-      );
+      info(`[NodeRename ${SCRIPT_VERSION}] 失败明细：\n${failures.join("\n")}`);
     }
   }
 

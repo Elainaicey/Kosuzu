@@ -4,7 +4,7 @@
 
 ## 使用方法
 
-[Override.js 的 Raw 地址](https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js)。文件头的当前版本为 `2026.10.04.1`。
+[Override.js 的 Raw 地址](https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js)。文件头的当前版本为 `2026.10.04.2`。
 
 Clash Party / Sparkle 中，将此地址添加为远程 **JS 覆写**，并将其绑定到当前订阅；更新覆写后重新应用该订阅。只更新 GitHub 文件不会自动改变已经生成的订阅 YAML。
 
@@ -47,6 +47,19 @@ PayPal、Meta、Discord、游戏平台使用 [MetaCubeX/meta-rules-dat](https://
 
 具体业务优先于静态 CDN，CDN 位于 GFWList 之前。所有下载的规则集均有对应分流规则。
 
+实际引用的规则来源如下，表中未列出的库没有直接接入：
+
+| 来源 | 使用内容 |
+| --- | --- |
+| MetaCubeX/meta-rules-dat | GeoSite、GeoIP：服务分类、国内与私有 IP；DNS 的国内域名分类 |
+| powerfullz/override-rules | TikTok、EHentai、Weibo、SteamFix、FCM、AdditionalFilter、AdditionalCDNResources |
+| SukkaW/Surge | Clash 格式的搜狗输入法、域名 CDN、非 IP CDN 规则 |
+| 666OS/rules | Emby 域名与 IP 规则 |
+| 217heidai/adblockfilters | Mihomo Lite 广告过滤 |
+| Loyalsoldier/clash-rules | GFWList |
+
+HTTP 规则集的更新间隔为 24 小时；Geo 数据自动更新由客户端设置控制。规则内容更新不会改变策略组或手动选择方式。
+
 自定义 DNS 完整保存在 `Override.js` 的 `createCustomDns()` 中，不继承输入配置的 DNS；保持 fake-ip 和 `dns.ipv6: false`。TUN 独立控制。
 
 ## 参数与地区识别
@@ -63,6 +76,8 @@ https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js#thre
 
 识别依据是名称，不探测真实出口。没有地区信息的节点仍可从备用选择和 Final 选择。链式代理启用时，落地节点不进入前置代理引用的国家组。
 
+`CN2` 只作为线路标签，不识别为中国节点；多个国旗按名称中首次出现的国旗识别。生成配置时检查节点重名、与策略组重名、缺失引用和循环引用；出现问题会报告对应名称，避免生成无法使用的配置。
+
 ## 维护
 
 直接维护 [Override.js](../mihomo/Override.js)，所有内容按章节排列：
@@ -74,7 +89,7 @@ https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js#thre
 | 策略组候选与顺序 | `createKosuzuGroups()` |
 | 分流规则与规则源 | `createKosuzuRules()`、`createKosuzuProviders()` |
 | 国家识别与顺序 | `KOSUZU_REGIONS`、`KOSUZU_REGION_ORDER` |
-| Emby 规则 | `createEmbyProviders()`、`createEmbyRules()` |
+| Emby 规则 | 并入 `createKosuzuProviders()`、`createKosuzuRules()` |
 | 参数、嗅探、TUN | `createKosuzuOptions()`、`createKosuzuRuntime()` |
 
 基础规则参考 [powerfullz/override-rules](https://github.com/powerfullz/override-rules)，保留其 [MIT 许可证](../mihomo/LICENSE)。上游更新不会自动改写本项目的分组逻辑，远程规则集仍按配置更新。

@@ -1,6 +1,6 @@
 /**
  * Kosuzu · Mihomo 配置覆写
- * 版本：2026.10.04.1
+ * 版本：2026.10.04.2
  *
  * 所有策略组均为 select；由用户选择并保存节点。
  * 直接修改本文件中的策略、地区和 DNS 配置。
@@ -18,20 +18,34 @@ function main(config) {
   if (!config || !Array.isArray(config.proxies)) {
     throw new Error("[Kosuzu] 配置中缺少有效的 proxies 数组");
   }
+  const names = new Set();
+  for (const node of config.proxies) {
+    if (!node || typeof node.name !== "string" || !node.name.trim()) {
+      throw new Error("[Kosuzu] 每个节点都必须有非空名称");
+    }
+    if (names.has(node.name)) {
+      throw new Error(`[Kosuzu] 节点名称重复：${node.name}`);
+    }
+    names.add(node.name);
+  }
   const options = createKosuzuOptions();
   const hasTailscale = config.proxies.some((node) => node.type === "tailscale");
   const runtime = createKosuzuRuntime(options, hasTailscale);
+  const groups = createKosuzuGroups(config.proxies, options);
+  validateKosuzuReferences(config.proxies, groups);
   return {
     proxies: config.proxies,
-    ...(config.hosts !== undefined ? {
-      hosts: config.hosts
-    } : {}),
+    ...(config.hosts !== undefined
+      ? {
+          hosts: config.hosts,
+        }
+      : {}),
     ...runtime,
     profile: {
       ...config.profile,
-      ...runtime.profile
+      ...runtime.profile,
     },
-    "proxy-groups": createKosuzuGroups(config.proxies, options),
+    "proxy-groups": groups,
     "rule-providers": createKosuzuProviders(),
     rules: createKosuzuRules(options, hasTailscale),
     dns: createCustomDns(),
@@ -71,41 +85,32 @@ function createCustomDns() {
       "+.msftncsi.com",
       "time.*.com",
       "ntp.*.com",
-      "+.ntp.org"
+      "+.ntp.org",
     ],
 
     // 解析 DNS 服务器自身的域名
-    "default-nameserver": [
-      "tls://223.5.5.5",
-      "tls://223.6.6.6"
-    ],
+    "default-nameserver": ["tls://223.5.5.5", "tls://223.6.6.6"],
 
     // 代理节点域名：直连解析，避免循环依赖
     "proxy-server-nameserver": [
       "https://dns.alidns.com/dns-query#DIRECT",
-      "https://doh.pub/dns-query#DIRECT"
+      "https://doh.pub/dns-query#DIRECT",
     ],
 
     // 默认解析：连接遵守分流规则
-    nameserver: [
-      "https://cloudflare-dns.com/dns-query",
-      "https://dns.google/dns-query"
-    ],
+    nameserver: ["https://cloudflare-dns.com/dns-query", "https://dns.google/dns-query"],
 
     // 直连域名：使用国内加密 DNS
     "direct-nameserver": [
       "https://dns.alidns.com/dns-query#DIRECT",
-      "https://doh.pub/dns-query#DIRECT"
+      "https://doh.pub/dns-query#DIRECT",
     ],
     "direct-nameserver-follow-policy": false,
 
     // 国内域名优先使用国内 DNS
     "nameserver-policy": {
-      "geosite:cn": [
-        "https://dns.alidns.com/dns-query#DIRECT",
-        "https://doh.pub/dns-query#DIRECT"
-      ]
-    }
+      "geosite:cn": ["https://dns.alidns.com/dns-query#DIRECT", "https://doh.pub/dns-query#DIRECT"],
+    },
   };
 }
 
@@ -149,14 +154,18 @@ function kosuzuUnique(items) {
 }
 
 function createKosuzuSelect(name, proxies, icon) {
+  const candidates = kosuzuUnique(proxies);
   return {
     name,
     type: "select",
-    proxies: proxies.length ? kosuzuUnique(proxies) : ["DIRECT"],
-    ...(icon ? {
-      icon: icon.startsWith("https://") ? icon :
-        `https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/${icon}.png`,
-    } : {}),
+    proxies: candidates.length ? candidates : ["DIRECT"],
+    ...(icon
+      ? {
+          icon: icon.startsWith("https://")
+            ? icon
+            : `https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/${icon}.png`,
+        }
+      : {}),
   };
 }
 
@@ -169,33 +178,82 @@ function createKosuzuGroups(proxies, options) {
   const allNames = kosuzuUnique(proxies.map((node) => node.name));
   const landingExit = hasLanding ? ["落地节点"] : [];
   const exits = kosuzuUnique(["选择代理", ...regionNames, ...landingExit, "备用选择", "DIRECT"]);
-  const commonNames = new Set(["美国节点", "香港节点", "日本节点", "新加坡节点", "台湾节点", "韩国节点"]);
+  const commonNames = new Set([
+    "美国节点",
+    "香港节点",
+    "日本节点",
+    "新加坡节点",
+    "台湾节点",
+    "韩国节点",
+  ]);
   const groups = [
     createKosuzuSelect("选择代理", [...landingExit, ...regionNames, "备用选择", "DIRECT"], "Proxy"),
     createKosuzuSelect("备用选择", allNames, "Available_1"),
     createKosuzuSelect("Final", [...exits, ...allNames], "Final"),
     ...regions.filter((group) => commonNames.has(group.name)),
     ...KOSUZU_SERVICES.map(([name, icon, preferred]) =>
-      createKosuzuSelect(name, exits.includes(preferred) ? [preferred, ...exits] : exits, icon)),
+      createKosuzuSelect(name, exits.includes(preferred) ? [preferred, ...exits] : exits, icon),
+    ),
     ...regions.filter((group) => !commonNames.has(group.name)),
   ];
 
   if (hasLanding) {
     groups.push(
-      createKosuzuSelect("落地节点", landingNodes.map((node) => node.name), "Airport"),
-      createKosuzuSelect("前置代理", [...regionNames, "DIRECT", ...frontNodes.map((node) => node
-        .name)], "Area")
+      createKosuzuSelect(
+        "落地节点",
+        landingNodes.map((node) => node.name),
+        "Airport",
+      ),
+      createKosuzuSelect(
+        "前置代理",
+        [...regionNames, "DIRECT", ...frontNodes.map((node) => node.name)],
+        "Area",
+      ),
     );
   }
   const tailscaleNodes = proxies.filter((node) => node.type === "tailscale");
   if (tailscaleNodes.length) {
-    groups.push(createKosuzuSelect("Tailscale", tailscaleNodes.map((node) => node.name),
-      "https://cdn.jsdelivr.net/gh/powerfullz/override-rules@main/icons/Tailscale.png"));
+    groups.push(
+      createKosuzuSelect(
+        "Tailscale",
+        tailscaleNodes.map((node) => node.name),
+        "https://cdn.jsdelivr.net/gh/powerfullz/override-rules@main/icons/Tailscale.png",
+      ),
+    );
   }
   groups.push(createKosuzuSelect("广告拦截", ["REJECT", "REJECT-DROP", "DIRECT"], "AdBlack"));
-  groups.push(createKosuzuSelect("GLOBAL", [...groups.map((group) => group.name), "DIRECT"],
-    "Global"));
+  groups.push(
+    createKosuzuSelect("GLOBAL", [...groups.map((group) => group.name), "DIRECT"], "Global"),
+  );
   return groups;
+}
+
+// 检查节点、策略组和链式代理的名称依赖，尽早给出可定位的错误。
+function validateKosuzuReferences(proxies, groups) {
+  const builtins = new Set(["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"]);
+  const dependencies = new Map(groups.map((group) => [group.name, group.proxies]));
+  for (const node of proxies) {
+    if (builtins.has(node.name) || dependencies.has(node.name)) {
+      throw new Error(`[Kosuzu] 节点名称与策略组或内置出口冲突：${node.name}`);
+    }
+    dependencies.set(node.name, node["dialer-proxy"] ? [node["dialer-proxy"]] : []);
+  }
+  const visiting = new Set();
+  const visited = new Set();
+  function visit(name) {
+    if (builtins.has(name) || visited.has(name)) return;
+    if (!dependencies.has(name)) {
+      throw new Error(`[Kosuzu] 引用了不存在的节点或策略组：${name}`);
+    }
+    if (visiting.has(name)) {
+      throw new Error(`[Kosuzu] 节点或策略组存在循环引用：${name}`);
+    }
+    visiting.add(name);
+    for (const target of dependencies.get(name)) visit(target);
+    visiting.delete(name);
+    visited.add(name);
+  }
+  for (const name of dependencies.keys()) visit(name);
 }
 
 function createKosuzuProvider(behavior, format, url, filename) {
@@ -205,46 +263,79 @@ function createKosuzuProvider(behavior, format, url, filename) {
     format,
     interval: 86400,
     url,
-    path: `./ruleset/${filename}`
+    path: `./ruleset/${filename}`,
   };
 }
 
 function createKosuzuProviders() {
   const upstream = "https://cdn.jsdelivr.net/gh/powerfullz/override-rules@main/ruleset";
   const sukka = "https://ruleset.skk.moe/Clash";
+  const emby = "https://github.com/666OS/rules/raw/release/mihomo";
   const text = (name, filename = `${name}.list`) =>
     createKosuzuProvider("classical", "text", `${upstream}/${filename}`, filename);
   return {
-    ADBlock: createKosuzuProvider("domain", "yaml",
+    ADBlock: createKosuzuProvider(
+      "domain",
+      "yaml",
       "https://cdn.jsdelivr.net/gh/217heidai/adblockfilters@main/rules/adblockmihomolite.yaml",
-      "ADBlock.yaml"),
+      "ADBlock.yaml",
+    ),
     AdditionalFilter: text("AdditionalFilter"),
-    SogouInput: createKosuzuProvider("classical", "text", `${sukka}/non_ip/sogouinput.txt`,
-      "SogouInput.txt"),
+    SogouInput: createKosuzuProvider(
+      "classical",
+      "text",
+      `${sukka}/non_ip/sogouinput.txt`,
+      "SogouInput.txt",
+    ),
     TikTok: text("TikTok"),
     EHentai: text("EHentai"),
     SteamFix: text("SteamFix"),
     GoogleFCM: text("GoogleFCM", "FirebaseCloudMessaging.list"),
     Weibo: text("Weibo"),
-    StaticResources: createKosuzuProvider("domain", "text", `${sukka}/domainset/cdn.txt`,
-      "StaticResources.txt"),
-    CDNResources: createKosuzuProvider("classical", "text", `${sukka}/non_ip/cdn.txt`,
-      "CDNResources.txt"),
+    StaticResources: createKosuzuProvider(
+      "domain",
+      "text",
+      `${sukka}/domainset/cdn.txt`,
+      "StaticResources.txt",
+    ),
+    CDNResources: createKosuzuProvider(
+      "classical",
+      "text",
+      `${sukka}/non_ip/cdn.txt`,
+      "CDNResources.txt",
+    ),
     AdditionalCDNResources: text("AdditionalCDNResources"),
-    GFWList: createKosuzuProvider("domain", "yaml",
-      "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt", "GFWList.yaml"),
-    ...createEmbyProviders(),
+    GFWList: createKosuzuProvider(
+      "domain",
+      "yaml",
+      "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt",
+      "GFWList.yaml",
+    ),
+    SUPPLEMENT_Emby: createKosuzuProvider(
+      "domain",
+      "mrs",
+      `${emby}/domain/Emby.mrs`,
+      "supplement/Emby.mrs",
+    ),
+    SUPPLEMENT_EmbyIP: createKosuzuProvider(
+      "ipcidr",
+      "mrs",
+      `${emby}/ip/Emby.mrs`,
+      "supplement/EmbyIP.mrs",
+    ),
   };
 }
 
 function createKosuzuRules(options, hasTailscale) {
   return [
     ...(!options.quic ? ["AND,((DST-PORT,443),(NETWORK,UDP)),REJECT"] : []),
-    ...(hasTailscale ? [
-      "IP-CIDR,100.64.0.0/10,Tailscale,no-resolve",
-      "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale,no-resolve",
-      "DOMAIN-SUFFIX,ts.net,Tailscale",
-    ] : []),
+    ...(hasTailscale
+      ? [
+          "IP-CIDR,100.64.0.0/10,Tailscale,no-resolve",
+          "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale,no-resolve",
+          "DOMAIN-SUFFIX,ts.net,Tailscale",
+        ]
+      : []),
     "GEOIP,private,DIRECT,no-resolve",
     "RULE-SET,ADBlock,广告拦截",
     "RULE-SET,AdditionalFilter,广告拦截",
@@ -283,7 +374,8 @@ function createKosuzuRules(options, hasTailscale) {
     "GEOSITE,apple,苹果服务",
     "GEOSITE,microsoft,微软服务",
     "GEOSITE,google,谷歌服务",
-    ...createEmbyRules(),
+    "RULE-SET,SUPPLEMENT_Emby,Emby服",
+    "RULE-SET,SUPPLEMENT_EmbyIP,Emby服,no-resolve",
 
     // CDN 与最后的兜底规则。
     "RULE-SET,StaticResources,选择代理",
@@ -300,6 +392,7 @@ function createKosuzuRules(options, hasTailscale) {
 // -----------------------------------------------------------------------------
 
 /** 国家与地区识别：旗帜优先，其次完整名称/城市，最后独立国家代码。 */
+// prettier-ignore
 const KOSUZU_REGIONS = [
   ["香港", "HK", "香港|港|Hong Kong|HongKong|九龙|九龍|HKG"],
   ["台湾", "TW", "台湾|台灣|台北|新北|高雄|Taiwan|Taipei|TPE"],
@@ -369,6 +462,7 @@ const KOSUZU_REGIONS = [
 ];
 
 // 显示顺序与识别表分开维护，调整常用地区不影响名称识别。
+// prettier-ignore
 const KOSUZU_REGION_ORDER = [
   "美国", "香港", "日本", "新加坡", "台湾", "韩国",
   "英国", "德国", "荷兰", "加拿大", "法国", "澳大利亚",
@@ -392,19 +486,25 @@ const KOSUZU_REGION_MATCHERS = KOSUZU_REGIONS.map(([name, code, aliases]) => ({
   flag: kosuzuFlag(code),
   aliases: aliases.split("|").map((alias) => ({
     alias,
-    regex: new RegExp(/[A-Za-z]/.test(alias) ?
-      `(?:^|[^A-Za-z])${kosuzuEscapeRegex(alias)}(?:$|[^A-Za-z])` :
-      kosuzuEscapeRegex(alias), "i"),
+    regex: new RegExp(
+      /[A-Za-z]/.test(alias)
+        ? `(?:^|[^A-Za-z])${kosuzuEscapeRegex(alias)}(?:$|[^A-Za-z])`
+        : kosuzuEscapeRegex(alias),
+      "i",
+    ),
   })),
   // 下划线和数字可作为分隔符；in / it / no 等常见词仅认大写或带编号形式。
   codeRegex: new RegExp(
     `(?:^|[^A-Za-z])(?:${code}(?:$|[^A-Za-z])|${code.toLowerCase()}[-_ ]?\\d)`,
-    ["IN", "IT", "NO", "IS", "AT", "BE", "MY", "AM", "ID"].includes(code) ? "" : "i"),
+    ["IN", "IT", "NO", "IS", "AT", "BE", "MY", "AM", "ID"].includes(code) ? "" : "i",
+  ),
 }));
 
 function kosuzuIdentifyRegion(nodeName) {
-  const name = String(nodeName || "");
-  const flag = KOSUZU_REGION_MATCHERS.find((region) => name.includes(region.flag));
+  // CN2 是线路名称；完整名称和国旗仍可识别同名节点的真实地区。
+  const name = String(nodeName || "").replace(/(^|[^A-Za-z])CN2(?=$|[^A-Za-z0-9])/gi, "$1");
+  const firstFlag = name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0];
+  const flag = KOSUZU_REGION_MATCHERS.find((region) => region.flag === firstFlag);
   if (flag) return flag.name;
 
   // 最长名称先匹配，避免「印度尼西亚」「白俄罗斯」被短名称抢先匹配。
@@ -434,37 +534,16 @@ function createKosuzuRegionGroups(nodes, options) {
   const groups = KOSUZU_REGIONS.flatMap(([name, code]) => {
     const proxies = [...new Set(buckets.get(name) || [])];
     if (proxies.length < options.threshold) return [];
-    return [{
-      name: `${name}节点`,
-      icon: `https://flagcdn.com/w80/${code.toLowerCase()}.png`,
-      type: "select",
-      proxies,
-    }];
+    return [
+      createKosuzuSelect(
+        `${name}节点`,
+        proxies,
+        `https://flagcdn.com/w80/${code.toLowerCase()}.png`,
+      ),
+    ];
   });
   const rank = new Map(KOSUZU_REGION_ORDER.map((name, index) => [`${name}节点`, index]));
   return groups.sort((a, b) => (rank.get(a.name) ?? 999) - (rank.get(b.name) ?? 999));
-}
-
-// -----------------------------------------------------------------------------
-// Emby 规则源
-// -----------------------------------------------------------------------------
-
-/** Emby 规则源；分组和规则顺序见前面的策略章节。 */
-function createEmbyProviders() {
-  const base = "https://github.com/666OS/rules/raw/release/mihomo";
-  return {
-    SUPPLEMENT_Emby: createKosuzuProvider("domain", "mrs",
-      `${base}/domain/Emby.mrs`, "supplement/Emby.mrs"),
-    SUPPLEMENT_EmbyIP: createKosuzuProvider("ipcidr", "mrs",
-      `${base}/ip/Emby.mrs`, "supplement/EmbyIP.mrs"),
-  };
-}
-
-function createEmbyRules() {
-  return [
-    "RULE-SET,SUPPLEMENT_Emby,Emby服",
-    "RULE-SET,SUPPLEMENT_EmbyIP,Emby服,no-resolve",
-  ];
 }
 
 // -----------------------------------------------------------------------------
@@ -473,16 +552,20 @@ function createEmbyRules() {
 
 /** 运行参数、嗅探、TUN 与 Geo 数据。 */
 function kosuzuBool(value) {
-  return value === true || value === 1 || value === "1" ||
-    (typeof value === "string" && value.toLowerCase() === "true");
+  return (
+    value === true ||
+    value === 1 ||
+    value === "1" ||
+    (typeof value === "string" && value.toLowerCase() === "true")
+  );
 }
 
 function createKosuzuOptions() {
   const args = typeof $arguments === "object" && $arguments ? $arguments : {};
   const threshold = Number(args.threshold);
   return {
-    threshold: args.threshold != null && Number.isFinite(threshold) ?
-      Math.max(1, Math.floor(threshold)) : 1,
+    threshold:
+      args.threshold != null && Number.isFinite(threshold) ? Math.max(1, Math.floor(threshold)) : 1,
     quic: kosuzuBool(args.quic),
     tun: kosuzuBool(args.tun),
     full: kosuzuBool(args.full),
@@ -494,36 +577,38 @@ function createKosuzuOptions() {
 function createKosuzuRuntime(options, hasTailscale) {
   const geoBase = "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release";
   return {
-    ...(options.full ? {
-      "mixed-port": 7890,
-      "redir-port": 7892,
-      "tproxy-port": 7893,
-      "routing-mark": 7894,
-      "allow-lan": true,
-      "bind-address": "*",
-      ipv6: options.ipv6,
-      mode: "rule",
-      "unified-delay": true,
-      "tcp-concurrent": true,
-      "find-process-mode": "off",
-      "log-level": "info",
-      "geodata-loader": "standard",
-      "external-controller": ":9999",
-      "disable-keep-alive": !options.keepalive,
-    } : {}),
+    ...(options.full
+      ? {
+          "mixed-port": 7890,
+          "redir-port": 7892,
+          "tproxy-port": 7893,
+          "routing-mark": 7894,
+          "allow-lan": true,
+          "bind-address": "*",
+          ipv6: options.ipv6,
+          mode: "rule",
+          "unified-delay": true,
+          "tcp-concurrent": true,
+          "find-process-mode": "off",
+          "log-level": "info",
+          "geodata-loader": "standard",
+          "external-controller": ":9999",
+          "disable-keep-alive": !options.keepalive,
+        }
+      : {}),
     profile: {
-      "store-selected": true
+      "store-selected": true,
     },
     sniffer: {
       sniff: {
         TLS: {
-          ports: [443, 8443]
+          ports: [443, 8443],
         },
         HTTP: {
-          ports: [80, 8080, 8880]
+          ports: [80, 8080, 8880],
         },
         QUIC: {
-          ports: [443, 8443]
+          ports: [443, 8443],
         },
       },
       "override-destination": false,
@@ -535,9 +620,9 @@ function createKosuzuRuntime(options, hasTailscale) {
       enable: options.tun,
       stack: "gvisor",
       device: "mihomo",
-      "route-exclude-address": hasTailscale ?
-        ["192.168.0.0/16"] :
-        ["100.64.0.0/10", "fd7a:115c:a1e0::/48", "192.168.0.0/16"],
+      "route-exclude-address": hasTailscale
+        ? ["192.168.0.0/16"]
+        : ["100.64.0.0/10", "fd7a:115c:a1e0::/48", "192.168.0.0/16"],
       "dns-hijack": ["any:53"],
       mtu: 1500,
     },

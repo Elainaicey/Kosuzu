@@ -1,7 +1,7 @@
 /**
  * @Sub-Store-Page
  *
- * CloudRename v1.1.2
+ * CloudRename v1.1.3
  * 本地机场节点分类、信息提取与重命名脚本
  *
  * 输出格式：
@@ -11,26 +11,9 @@
  * 🇭🇰|XSUS|香港01|0.8x
  * 🇭🇰|FlowerCloud|香港01|实验性|IEPL|专线
  *
- * v1.1.2 优化：
- * - 客户端已能显示协议，不再把协议/传输/TLS 写入节点名
- *
- * v1.1.1 优化：
- * - 更多等级/线路/IP/流媒体别名，识别括号中的自定义描述
- * - 名称长度或标签数量受限时优先保留等级，再按原名顺序展示
- * - 无法可靠判断的自由文本不猜测为标签，避免混入机场名或地区
- *
- * 既有能力：
- * - 不检测落地 IP，不请求任何外部 API
- * - 地区别名只标准化一次，大订阅自动切换为 O(节点名长度) 的自动机匹配
- * - 精确代码、机场代码、国旗、长别名和节点元数据组成分层识别路径
- * - 修复 CN2 被识别为中国、IN01/IT01/NO01/IS01 漏判等边界问题
- * - 从节点名提取等级、线路、IP 属性、用途、倍率和自定义标签
- * - 标签按原名出现顺序输出，长名称优先保留倍率
- * - 过滤规则、标签规则、倍率规则全部预编译
- * - 同名节点使用无碰撞去重，长名称也会为 #2/#3 完整预留空间
- * - mode=off 时真正不修改名称，也不会再被 dedupe 追加 #2/#3
- * - 支持自定义分隔符、名称长度、序号宽度及输出字段
- * - 保留原地区数据、识别优先级和默认输出格式
+ * 根据国旗、国家代码、国家/城市名称及元数据识别地区。
+ * 完整长名称优先；保留等级、线路、IP 属性、用途、倍率和自定义标签。
+ * 本地处理，无外部请求；支持伪节点过滤、长度限制和重名去重。
  *
  * 参数：
  * drop_info=1       过滤流量/到期/官网/通知类伪节点，默认 1
@@ -62,7 +45,7 @@
  * #drop_info=1&mode=prefix&show_line=1&max_tags=24&show_rate=1&dedupe=1
  */
 
-const SCRIPT_VERSION = "1.1.2";
+const SCRIPT_VERSION = "1.1.3";
 
 const UNKNOWN_REGION = Object.freeze({
   code: "OT",
@@ -76,14 +59,12 @@ const GLOBAL_REGION = Object.freeze({
   flag: "🌐",
 });
 
-const GLOBAL_REGION_RE =
-  /(^|\s)(?:global|worldwide|auto)(?=\s|$)|全球|世界|自动选择/i;
+const GLOBAL_REGION_RE = /(^|\s)(?:global|worldwide|auto)(?=\s|$)|全球|世界|自动选择/i;
 
 const INFO_HARD_RE =
   /剩余流量|已用流量|可用流量|流量重置|套餐到期|到期时间|过期时间|(?:^|[^a-z])(?:traffic|expire|expires|expiration)\s*:/i;
 
-const INFO_SOFT_ZH_RE =
-  /官网|网站|网址|订阅|更新|通知|公告|提示|用户|账户|客服|工单/;
+const INFO_SOFT_ZH_RE = /官网|网站|网址|订阅|更新|通知|公告|提示|用户|账户|客服|工单/;
 
 const INFO_SOFT_EN_RE =
   /(?:^|[^a-z])(?:subscription|remaining|remain|used|total|reset|renew|notice|official|website)(?=$|[^a-z])/i;
@@ -94,8 +75,7 @@ const INFO_TRAFFIC_ONLY_RE =
 const INFO_EXPIRE_ONLY_RE =
   /^\s*(?:expire|expires|expiration)\s*[:：]\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*$/i;
 
-const USAGE_RE =
-  /\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB|KiB|T|G|M|K)\b/i;
+const USAGE_RE = /\d+(?:\.\d+)?\s*(?:TB|GB|MB|KB|TiB|GiB|MiB|KiB|T|G|M|K)\b/i;
 
 const EXPIRE_RE =
   /(?:\d+\s*(?:D|天|日)|\d+\s*(?:H|时|小时)|到期|过期|剩余|(?:^|[^a-z])(?:expire|expired|expiration)(?=$|[^a-z]))/i;
@@ -104,6 +84,7 @@ const RATE_RE =
   /(?:倍率|rate|倍速)\s*[:：=]?\s*[x×*]?\s*(\d+(?:\.\d+)?)|(?:^|[\s|｜_\-/\\[(（])(?:x|×|\*)\s*(\d+(?:\.\d+)?)(?=$|[\s|｜_\-/\\\])）])|(\d+(?:\.\d+)?)\s*(?:倍率|倍|x|×)(?=$|[\s|｜_\-/\\\])）])/i;
 
 // 具体线路先于通用线路，避免 CN2 GIA 同时产出 CN2。
+// prettier-ignore
 const TAG_RULES = Object.freeze([
   [/\bCN2\s*GIA\b/i, "CN2 GIA", "route"],
   [/\bCN2\b/i, "CN2", "route"],
@@ -159,6 +140,7 @@ const TAG_RULES = Object.freeze([
   [/\bSVIP\b/i, "SVIP", "tier"],
   [/\bVIP\b/i, "VIP", "tier"],
   [/企业|企業|\benterprise\b/i, "企业", "tier"],
+  [/商宽|商寬|\bbusiness\s*broadband\b/i, "商宽", "ip"],
   [/商务|商務|\bbusiness\b/i, "商务", "tier"],
   [/轻量|輕量|\blite\b/i, "轻量", "tier"],
   [/试用|試用|\btrial\b/i, "试用", "tier"],
@@ -175,7 +157,6 @@ const TAG_RULES = Object.freeze([
   [/家庭宽带|家庭寬頻|家庭宽頻/i, "家宽", "ip"],
   [/住宅(?:IP)?|\bresidential(?:\s*ip)?\b/i, "住宅", "ip"],
   [/原生(?:IP)?|\bnative\s*ip\b/i, "原生", "ip"],
-  [/商宽|商寬|\bbusiness\s*broadband\b/i, "商宽", "ip"],
   [/数据中心|數據中心|机房|機房|\b(?:datacenter|data\s*center)\b/i, "机房", "ip"],
   [/独享|獨享|独立IP|獨立IP|\bdedicated\s*ip\b/i, "独享", "ip"],
   [/共享|共用|\bshared\s*ip\b/i, "共享", "ip"],
@@ -217,7 +198,7 @@ const TAG_RULES = Object.freeze([
 ]);
 const TAG_MASTER_RE = new RegExp(
   TAG_RULES.map(([pattern]) => `(${pattern.source})`).join("|"),
-  "gi"
+  "gi",
 );
 const TAG_PRIORITY = Object.freeze({
   tier: 0,
@@ -266,6 +247,7 @@ const PROVIDER_METADATA_KEYS = Object.freeze([
  *
  * 与原扩展版地区表保持一致；使用紧凑数组是为了降低脚本体积和初始化开销。
  */
+// prettier-ignore
 const REGION_ROWS = [
   ["HK", "香港", "香港", "hong kong", "hkg", "hk"],
   ["TW", "台湾", "台湾", "台灣", "台北", "新北", "高雄", "taiwan", "taipei", "tpe", "khh", "tw"],
@@ -378,11 +360,6 @@ const REGION_ROWS = [
   ["ET", "埃塞俄比亚", "埃塞俄比亚", "埃塞俄比亞", "亚的斯亚贝巴", "亞的斯亞貝巴", "ethiopia", "addis ababa", "add", "et"],
 ];
 
-const PRIMARY_REGION_CODES = [
-  "HK", "TW", "MO", "CN", "JP", "SG", "KR", "US", "CA", "GB", "DE", "FR",
-  "NL", "AU", "NZ", "MY", "TH", "VN", "PH", "ID", "IN", "AE", "TR", "RU",
-];
-
 function normalizeRegionText(value) {
   let text = String(value || "");
   if (LATIN_DIACRITIC_RE.test(text)) {
@@ -396,138 +373,46 @@ function normalizeRegionText(value) {
     .toLowerCase();
 }
 
-/*
- * Aho-Corasick 自动机让全部“包含别名”的匹配成本只与节点名长度有关，
- * 不再随地区/别名数量增长。输出保存命中路径上的最高优先级地区。
- */
-function buildSubstringMatcher(rules) {
-  const transitions = [Object.create(null)];
-  const failures = [0];
-  const bestRanks = [Infinity];
-
-  for (const rule of rules) {
-    let state = 0;
-    for (let index = 0; index < rule.alias.length; index++) {
-      const character = rule.alias[index];
-      let next = transitions[state][character];
-      if (next === undefined) {
-        next = transitions.length;
-        transitions[state][character] = next;
-        transitions.push(Object.create(null));
-        failures.push(0);
-        bestRanks.push(Infinity);
-      }
-      state = next;
-    }
-    if (rule.rank < bestRanks[state]) {
-      bestRanks[state] = rule.rank;
-    }
-  }
-
-  const queue = [];
-  for (const character of Object.keys(transitions[0])) {
-    queue.push(transitions[0][character]);
-  }
-
-  for (let head = 0; head < queue.length; head++) {
-    const state = queue[head];
-    const edges = transitions[state];
-    for (const character of Object.keys(edges)) {
-      const next = edges[character];
-      let fallback = failures[state];
-      while (
-        fallback !== 0 &&
-        transitions[fallback][character] === undefined
-      ) {
-        fallback = failures[fallback];
-      }
-      const fallbackState = transitions[fallback][character];
-      failures[next] =
-        fallbackState === undefined ? 0 : fallbackState;
-      if (bestRanks[failures[next]] < bestRanks[next]) {
-        bestRanks[next] = bestRanks[failures[next]];
-      }
-      queue.push(next);
-    }
-  }
-
-  return { transitions, failures, bestRanks };
-}
-
+// 一套预编译索引同时供地区识别和机场名清理使用。
 function buildRegionIndexes() {
   const data = Object.create(null);
-  for (const [code, name, ...aliases] of REGION_ROWS) {
-    data[code] = {
-      code,
-      name,
-      flag: ccToFlag(code),
-      aliases,
-    };
-  }
-
-  const allCodes = REGION_ROWS.map((row) => row[0]);
-  const primaryCodes = new Set(PRIMARY_REGION_CODES);
-  const priority = [
-    ...PRIMARY_REGION_CODES,
-    ...allCodes.filter((code) => !primaryCodes.has(code)),
-  ];
-  const rank = new Map(priority.map((code, index) => [code, index]));
   const tokenIndex = new Map();
-  const exactAliases = new Set();
-  const substringRules = [];
-
-  for (const code of priority) {
-    const item = data[code];
-    for (const alias of item.aliases) {
+  for (const [code, name, ...aliases] of REGION_ROWS) {
+    data[code] = { code, name, flag: ccToFlag(code) };
+    for (const alias of aliases) {
       const normalized = normalizeRegionText(alias);
-      if (!normalized) {
-        continue;
-      }
-      exactAliases.add(normalized);
-
-      /*
-       * 任意无空格别名都进入快速精确索引。
-       * 对长度为 2~3 的纯字母/数字别名，原逻辑只允许完整词匹配，
-       * 因此不加入 substringRules，防止 in/it/no/is 一类误判。
-       */
-      if (!normalized.includes(" ") && !tokenIndex.has(normalized)) {
-        tokenIndex.set(normalized, code);
-      }
-      if (!/^[a-z0-9]{2,3}$/.test(normalized)) {
-        substringRules.push({
-          code,
-          rank: rank.get(code),
-          alias: normalized,
-        });
-      }
+      if (normalized && !tokenIndex.has(normalized)) tokenIndex.set(normalized, code);
     }
   }
-
-  return {
-    data,
-    priority,
-    rank,
-    tokenIndex,
-    exactAliases,
-    substringRules,
-  };
+  const exactAliases = new Set(tokenIndex.keys());
+  const aliases = [...exactAliases]
+    .filter((alias) => !/^[a-z0-9]{2,3}$/.test(alias))
+    .sort((a, b) => b.length - a.length);
+  const escape = (alias) => alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const latin = aliases
+    .filter((alias) => /[a-z]/.test(alias))
+    .map(escape)
+    .join("|");
+  const other = aliases
+    .filter((alias) => !/[a-z]/.test(alias))
+    .map(escape)
+    .join("|");
+  const aliasRegex = new RegExp(`(?:^|[^a-z])(${latin})(?=$|[^a-z])|(${other})`, "g");
+  return { data, tokenIndex, exactAliases, aliasRegex };
 }
 
 const REGION_INDEX = buildRegionIndexes();
 const REGION_DATA = REGION_INDEX.data;
-const REGION_PRIORITY = REGION_INDEX.priority;
-const REGION_RANK = REGION_INDEX.rank;
 const REGION_TOKEN_INDEX = REGION_INDEX.tokenIndex;
 const REGION_EXACT_ALIASES = REGION_INDEX.exactAliases;
-const REGION_SUBSTRING_RULES = REGION_INDEX.substringRules;
-let REGION_MATCHER = null;
 
 function operator(proxies = []) {
-  const args =
-    typeof $arguments === "object" && $arguments ? $arguments : {};
+  const args = typeof $arguments === "object" && $arguments ? $arguments : {};
   const source = Array.isArray(proxies) ? proxies : [];
 
-  const modeValue = String(args.mode || "prefix").trim().toLowerCase();
+  const modeValue = String(args.mode || "prefix")
+    .trim()
+    .toLowerCase();
   const mode = MODE_VALUES.has(modeValue) ? modeValue : "prefix";
   const options = {
     dropInfo: argBool(args.drop_info, true),
@@ -560,20 +445,11 @@ function operator(proxies = []) {
    * 完全透传是最常见的“临时关闭脚本”场景。这里直接返回原数组，
    * 避免无意义的分配、分类和 Map 初始化。
    */
-  if (
-    options.mode === "off" &&
-    !options.dropInfo &&
-    options.keepUnknown &&
-    !options.debug
-  ) {
+  if (options.mode === "off" && !options.dropInfo && options.keepUnknown && !options.debug) {
     return source;
   }
 
-  // 小订阅避免自动机初始化成本，大订阅则切换到线性匹配器。
-  if (source.length >= 768 && REGION_MATCHER === null) {
-    REGION_MATCHER = buildSubstringMatcher(REGION_SUBSTRING_RULES);
-  }
-
+  const references = captureProxyReferences(source);
   const counters = new Map();
   const regionCache = new Map();
   const providerCache = new Map();
@@ -617,14 +493,9 @@ function operator(proxies = []) {
       continue;
     }
 
-    const needsRegion =
-      infoKind === 1 || !options.keepUnknown || options.mode !== "off";
+    const needsRegion = infoKind === 1 || !options.keepUnknown || options.mode !== "off";
     let region = needsRegion ? getRegion(oldName) : UNKNOWN_REGION;
-    if (
-      needsRegion &&
-      options.useMetadata &&
-      region.code === "OT"
-    ) {
+    if (needsRegion && options.useMetadata && region.code === "OT") {
       const metadataRegion = regionFromMetadata(proxy);
       if (metadataRegion.code !== "OT") {
         region = metadataRegion;
@@ -654,12 +525,11 @@ function operator(proxies = []) {
       continue;
     }
 
-    const tagMatches = options.showLine && options.maxTags > 0
-      ? collectTagMatches(oldName, options.customTags)
-      : null;
-    const needsProvider =
-      options.showProvider ||
-      (options.showRegion && options.showSeq);
+    const tagMatches =
+      options.showLine && options.maxTags > 0
+        ? collectTagMatches(oldName, options.customTags)
+        : null;
+    const needsProvider = options.showProvider || (options.showRegion && options.showSeq);
     const provider = needsProvider
       ? providerFromNode(proxy, options.provider, providerCache, tagMatches, options.customTags)
       : "";
@@ -670,31 +540,24 @@ function operator(proxies = []) {
         const counterKey = `${provider}\u0000${region.code}`;
         const sequence = (counters.get(counterKey) || 0) + 1;
         counters.set(counterKey, sequence);
-        regionLabel = `${region.name}${padNumber(
-          sequence,
-          options.seqWidth
-        )}`;
+        regionLabel = `${region.name}${padNumber(sequence, options.seqWidth)}`;
       } else {
         regionLabel = region.name;
       }
     }
 
-    const tag = buildName({
-      flag: options.showFlag ? region.flag : "",
-      provider: options.showProvider ? provider : "",
-      regionLabel,
-      lineTags: options.showLine
-        ? detectTags(tagMatches || [], options)
-        : [],
-      rate: options.showRate ? detectRate(oldName, proxy) : "",
-    }, options);
-
-    proxy.name = applyMode(
-      oldName,
-      tag,
-      options.mode,
-      options.nameLength
+    const tag = buildName(
+      {
+        flag: options.showFlag ? region.flag : "",
+        provider: options.showProvider ? provider : "",
+        regionLabel,
+        lineTags: options.showLine ? detectTags(tagMatches || [], options) : [],
+        rate: options.showRate ? detectRate(oldName, proxy) : "",
+      },
+      options,
     );
+
+    proxy.name = applyMode(oldName, tag, options.mode, options.nameLength);
     output.push(proxy);
     if (stats) {
       stats.renamed++;
@@ -704,6 +567,7 @@ function operator(proxies = []) {
   if (options.dedupe && options.mode !== "off") {
     dedupeNames(output, options.nameLength);
   }
+  updateProxyReferences(output, references);
   if (stats) {
     logStats(stats, output.length);
   }
@@ -736,9 +600,7 @@ function separatorArg(value, fallback) {
   if (value === undefined || value === null || value === "") {
     return fallback;
   }
-  const separator = String(value)
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .slice(0, 4);
+  const separator = truncateText(String(value).replace(/[\u0000-\u001f\u007f]/g, ""), 4);
   return separator || fallback;
 }
 
@@ -761,31 +623,39 @@ function truncateText(value, maxLength) {
 
 function buildName(data, options) {
   const separator = options.separator;
-  const head = [data.flag, data.provider, data.regionLabel].filter(Boolean);
   const tail = data.rate ? [data.rate] : [];
+  // 优先为地区和倍率预留空间；机场名过长时单独截短。
+  const required = [data.flag, data.regionLabel, ...tail].filter(Boolean);
+  const available =
+    options.nameLength - required.join(separator).length - (required.length ? separator.length : 0);
+  const provider = truncateText(data.provider, Math.max(0, available));
+  const head = [data.flag, provider, data.regionLabel].filter(Boolean);
   const selected = [];
   let length = head.join(separator).length;
   const tailLength = tail.join(separator).length;
 
   // 先选重要标签，再恢复其在原名中的顺序。长度限制不会吞掉靠后的等级。
-  const candidates = data.lineTags.slice().sort((a, b) =>
-    TAG_PRIORITY[a.category] - TAG_PRIORITY[b.category] || a.start - b.start
-  );
+  const candidates = data.lineTags
+    .slice()
+    .sort((a, b) => TAG_PRIORITY[a.category] - TAG_PRIORITY[b.category] || a.start - b.start);
   for (const candidate of candidates) {
     if (selected.length >= options.maxTags) {
       break;
     }
-    const addedLength = candidate.label.length +
-      (head.length + selected.length ? separator.length : 0);
-    const candidateLength = length + addedLength +
-      (tail.length ? separator.length + tailLength : 0);
+    const addedLength =
+      candidate.label.length + (head.length + selected.length ? separator.length : 0);
+    const candidateLength =
+      length + addedLength + (tail.length ? separator.length + tailLength : 0);
     if (candidateLength <= options.nameLength) {
       selected.push(candidate);
       length += addedLength;
     }
   }
   selected.sort((a, b) => a.start - b.start);
-  const fields = head.concat(selected.map((item) => item.label), tail);
+  const fields = head.concat(
+    selected.map((item) => item.label),
+    tail,
+  );
   return truncateText(fields.join(separator), options.nameLength);
 }
 
@@ -795,12 +665,11 @@ function applyMode(oldName, tag, mode, nameLength) {
   }
   if (mode === "suffix") {
     const old = String(oldName || "");
-    if (old === tag || old.endsWith(` ${tag}`)) {
-      return truncateText(old, nameLength);
-    }
+    if (old === tag) return truncateText(tag, nameLength);
+    const prefix = old.endsWith(` ${tag}`) ? old.slice(0, -tag.length - 1) : old;
     const available = nameLength - tag.length - 1;
     return available > 0
-      ? `${truncateText(old, available).trim()} ${tag}`.trim()
+      ? `${truncateText(prefix, available).trim()} ${tag}`.trim()
       : truncateText(tag, nameLength);
   }
   return truncateText(tag, nameLength);
@@ -811,22 +680,24 @@ function normalizeProviderName(value, maxLength = 24) {
   if (!raw) {
     return "";
   }
-  return raw
-    .replace(/[⏳✅❌⭐️]/g, "")
-    .replace(FLAG_ALL_RE, "")
-    .replace(GENERIC_REGION_ICON_RE, "")
-    .replace(/[｜|]/g, " ")
-    .replace(/[【】()[\]（）{}〈〉]/g, " ")
-    .replace(/^[\s|\-_/\\]+|[\s|\-_/\\]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, maxLength);
+  return truncateText(
+    raw
+      .replace(/[⏳✅❌⭐️]/g, "")
+      .replace(FLAG_ALL_RE, "")
+      .replace(GENERIC_REGION_ICON_RE, "")
+      .replace(/[｜|]/g, " ")
+      .replace(/[【】()[\]（）{}〈〉]/g, " ")
+      .replace(/^[\s|\-_/\\]+|[\s|\-_/\\]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim(),
+    maxLength,
+  );
 }
 
 function providerCandidateFromPart(value) {
   const part = normalizeProviderName(value, 256)
     .replace(RATE_RE, " ")
-    .replace(/(?:线路|線路|节点|節點|\b(?:node|server|vps)\b)\s*\d{0,3}/ig, " ")
+    .replace(/(?:线路|線路|节点|節點|\b(?:node|server|vps)\b)\s*\d{0,3}/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!part) {
@@ -849,20 +720,15 @@ function providerCandidateFromPart(value) {
     let rawPhrase = "";
     const last = Math.min(normalizedTokens.length, start + 5);
     for (let end = start + 1; end <= last; end++) {
-      rawPhrase += `${end === start + 1 ? "" : " "}${
-        normalizedTokens[end - 1]
-      }`;
+      rawPhrase += `${end === start + 1 ? "" : " "}${normalizedTokens[end - 1]}`;
       const lastCode = rawPhrase.charCodeAt(rawPhrase.length - 1);
       const phrase =
-        lastCode >= 48 && lastCode <= 57
-          ? rawPhrase.replace(/\d{1,3}$/, "").trim()
-          : rawPhrase;
+        lastCode >= 48 && lastCode <= 57 ? rawPhrase.replace(/\d{1,3}$/, "").trim() : rawPhrase;
       if (
         REGION_EXACT_ALIASES.has(phrase) ||
         (end === start + 1 &&
           (regionCodeFromToken(rawPhrase) ||
-            (/^[A-Z]{2}$/.test(tokens[start]) &&
-              REGION_DATA[tokens[start]])))
+            (/^[A-Z]{2}$/.test(tokens[start]) && REGION_DATA[tokens[start]])))
       ) {
         bestEnd = end;
       }
@@ -962,9 +828,7 @@ function classifyInfoNode(name) {
   ) {
     return 2;
   }
-  return INFO_SOFT_ZH_RE.test(text) || INFO_SOFT_EN_RE.test(text)
-    ? 1
-    : 0;
+  return INFO_SOFT_ZH_RE.test(text) || INFO_SOFT_EN_RE.test(text) ? 1 : 0;
 }
 
 function detectRegion(name) {
@@ -984,38 +848,14 @@ function detectRegion(name) {
   if (!normalized) {
     return UNKNOWN_REGION;
   }
-  const tokens = normalized.split(" ");
-
-  /*
-   * 快速路径：先从完整词索引中找优先级最高的地区。
-   * 同时支持 hk01、hkg02、in01 等常见“代码+序号”命名。
-   */
-  let bestCode = "";
-  let bestRank = Infinity;
-  for (const token of tokens) {
+  // 长名称先于短代码，避免 Korea / 俄罗斯抢先命中完整国家名称。
+  const aliasCode = matchRegionAlias(normalized);
+  if (aliasCode) return regionFromCC(aliasCode);
+  for (const token of normalized.split(" ")) {
     const code = regionCodeFromToken(token);
-    const rank = code ? REGION_RANK.get(code) : Infinity;
-    if (rank < bestRank) {
-      bestCode = code;
-      bestRank = rank;
-      if (rank === 0) {
-        break;
-      }
-    }
+    if (code) return regionFromCC(code);
   }
 
-  /*
-   * 长别名兼容路径由自动机一次扫描完成；即使名称中出现多个地区，
-   * 仍严格保留地区表原有的优先级。
-   */
-  const substringCode = matchSubstringRegion(normalized, bestRank);
-  if (substringCode) {
-    bestCode = substringCode;
-  }
-
-  if (bestCode) {
-    return regionFromCC(bestCode);
-  }
   if (GLOBAL_REGION_RE.test(normalized) || GLOBAL_REGION_RE.test(raw)) {
     return GLOBAL_REGION;
   }
@@ -1052,45 +892,16 @@ function regionCodeFromToken(token) {
   return "";
 }
 
-function matchSubstringRegion(text, rankLimit = Infinity) {
-  if (rankLimit === 0) {
-    return "";
+function matchRegionAlias(text) {
+  const regex = REGION_INDEX.aliasRegex;
+  regex.lastIndex = 0;
+  let best = "";
+  let match;
+  while ((match = regex.exec(text))) {
+    const alias = match[1] || match[2];
+    if (alias.length > best.length) best = alias;
   }
-  if (REGION_MATCHER === null) {
-    for (const rule of REGION_SUBSTRING_RULES) {
-      if (rule.rank >= rankLimit) {
-        break;
-      }
-      if (text.includes(rule.alias)) {
-        return rule.code;
-      }
-    }
-    return "";
-  }
-
-  const { transitions, failures, bestRanks } = REGION_MATCHER;
-  let state = 0;
-  let bestRank = rankLimit;
-
-  for (let index = 0; index < text.length; index++) {
-    const character = text[index];
-    let next = transitions[state][character];
-    while (state !== 0 && next === undefined) {
-      state = failures[state];
-      next = transitions[state][character];
-    }
-    state = next === undefined ? 0 : next;
-
-    const rank = bestRanks[state];
-    if (rank < bestRank) {
-      bestRank = rank;
-      if (bestRank === 0) {
-        break;
-      }
-    }
-  }
-
-  return bestRank < rankLimit ? REGION_PRIORITY[bestRank] : "";
+  return REGION_TOKEN_INDEX.get(best) || "";
 }
 
 function removeFlags(value) {
@@ -1126,7 +937,8 @@ function regionFromMetadata(proxy) {
     if (typeof value !== "string" || !value.trim()) {
       continue;
     }
-    const region = detectRegion(value);
+    const code = value.trim().toUpperCase();
+    const region = REGION_DATA[code] || detectRegion(value);
     if (region.code !== "OT") {
       return region;
     }
@@ -1154,10 +966,7 @@ function ccToFlag(cc) {
   if (!/^[A-Z]{2}$/.test(code)) {
     return "🏳️";
   }
-  return String.fromCodePoint(
-    0x1f1e6 + code.charCodeAt(0) - 65,
-    0x1f1e6 + code.charCodeAt(1) - 65
-  );
+  return String.fromCodePoint(0x1f1e6 + code.charCodeAt(0) - 65, 0x1f1e6 + code.charCodeAt(1) - 65);
 }
 
 function flagToCC(text) {
@@ -1167,17 +976,14 @@ function flagToCC(text) {
   }
   const first = match[0].codePointAt(0);
   const second = match[0].codePointAt(2);
-  return (
-    String.fromCharCode(65 + first - 0x1f1e6) +
-    String.fromCharCode(65 + second - 0x1f1e6)
-  );
+  return String.fromCharCode(65 + first - 0x1f1e6) + String.fromCharCode(65 + second - 0x1f1e6);
 }
 
 function parseCustomTags(value) {
   const result = [];
   const seen = new Set();
   for (const item of String(value || "").split(/[,，;；]/)) {
-    const tag = item.trim().slice(0, 24);
+    const tag = truncateText(item.trim(), 24);
     const key = tag.toLowerCase();
     if (tag && !seen.has(key)) {
       seen.add(key);
@@ -1195,7 +1001,9 @@ function validExtraLabel(value) {
   if (
     label.length < 2 ||
     label.length > 16 ||
-    !/^[A-Za-z0-9\u00c0-\u024f\u3400-\u9fff][A-Za-z0-9\u00c0-\u024f\u3400-\u9fff +_.-]*$/.test(label) ||
+    !/^[A-Za-z0-9\u00c0-\u024f\u3400-\u9fff][A-Za-z0-9\u00c0-\u024f\u3400-\u9fff +_.-]*$/.test(
+      label,
+    ) ||
     !/[A-Za-z\u00c0-\u024f\u3400-\u9fff]/.test(label) ||
     RATE_RE.test(label) ||
     PROTOCOL_NAME_RE.test(label) ||
@@ -1208,16 +1016,17 @@ function validExtraLabel(value) {
     return false;
   }
   const normalized = normalizeRegionText(label).replace(/\d{1,3}$/, "");
-  return !REGION_EXACT_ALIASES.has(normalized) &&
+  return (
+    !REGION_EXACT_ALIASES.has(normalized) &&
     !regionCodeFromToken(normalized) &&
-    !GLOBAL_REGION_RE.test(label);
+    !GLOBAL_REGION_RE.test(label)
+  );
 }
 
 function collectTagMatches(name, customTags = []) {
   const text = String(name || "");
   const matches = [];
-  const overlaps = (start, end) =>
-    matches.some((match) => start < match.end && end > match.start);
+  const overlaps = (start, end) => matches.some((match) => start < match.end && end > match.start);
 
   // 自定义复合词优先，允许把“静态住宅”保留为一个完整标签。
   if (customTags.length) {
@@ -1229,10 +1038,8 @@ function collectTagMatches(name, customTags = []) {
         const end = start + term.length;
         const asciiFirst = /[a-z0-9]/i.test(term[0]);
         const asciiLast = /[a-z0-9]/i.test(term[term.length - 1]);
-        const leftOk = !asciiFirst || start === 0 ||
-          !/[a-z0-9]/i.test(lower[start - 1]);
-        const rightOk = !asciiLast || end === lower.length ||
-          !/[a-z0-9]/i.test(lower[end]);
+        const leftOk = !asciiFirst || start === 0 || !/[a-z0-9]/i.test(lower[start - 1]);
+        const rightOk = !asciiLast || end === lower.length || !/[a-z0-9]/i.test(lower[end]);
         if (leftOk && rightOk && !overlaps(start, end)) {
           matches.push({ start, end, label, category: "custom" });
         }
@@ -1266,13 +1073,12 @@ function collectTagMatches(name, customTags = []) {
   EXTRA_FIELD_RE.lastIndex = 0;
   while ((match = EXTRA_FIELD_RE.exec(text))) {
     const label = match[2];
-    if (
-      validExtraLabel(label) &&
-      !overlaps(match.index, match.index + match[0].length)
-    ) {
+    if (validExtraLabel(label) && !overlaps(match.index, match.index + match[0].length)) {
       const category = /^(?:等级|等級|级别|級別|档位|檔位|套餐|计划|計劃|版型)$/.test(match[1])
         ? "tier"
-        : /^(?:线路|線路)$/.test(match[1]) ? "route" : "extra";
+        : /^(?:线路|線路)$/.test(match[1])
+          ? "route"
+          : "extra";
       matches.push({
         start: match.index,
         end: match.index + match[0].length,
@@ -1286,11 +1092,7 @@ function collectTagMatches(name, customTags = []) {
   while ((match = EXTRA_BRACKET_RE.exec(text))) {
     const label = (match[1] || match[2] || match[3] || match[4]).trim();
     const prefix = removeFlags(text.slice(0, match.index)).trim();
-    if (
-      prefix &&
-      validExtraLabel(label) &&
-      !overlaps(match.index, match.index + match[0].length)
-    ) {
+    if (prefix && validExtraLabel(label) && !overlaps(match.index, match.index + match[0].length)) {
       matches.push({
         start: match.index,
         end: match.index + match[0].length,
@@ -1337,9 +1139,37 @@ function detectRate(name, proxy) {
   const match = RATE_RE.exec(text);
   const metadata = proxy?._multiplier ?? proxy?._rate ?? proxy?.multiplier;
   const rate = Number(match ? match[1] || match[2] || match[3] : metadata);
-  return Number.isFinite(rate) && rate > 0 && rate <= 1000
-    ? `${rate}x`
-    : "";
+  return Number.isFinite(rate) && rate > 0 && rate <= 1000 ? `${rate}x` : "";
+}
+
+// 名称引用绑定到节点对象，去重完成后再写回最终名称。
+function captureProxyReferences(proxies) {
+  const byName = new Map();
+  const duplicates = new Set();
+  for (const proxy of proxies) {
+    if (!proxy || typeof proxy.name !== "string") continue;
+    if (byName.has(proxy.name)) duplicates.add(proxy.name);
+    byName.set(proxy.name, proxy);
+  }
+  const references = [];
+  for (const proxy of proxies) {
+    for (const key of ["dialer-proxy", "underlying-proxy"]) {
+      const name = proxy?.[key];
+      if (!byName.has(name)) continue; // 外部策略组由最终配置负责。
+      if (duplicates.has(name)) throw new Error(`[重命名] 前置节点名称不唯一：${name}`);
+      references.push({ proxy, key, target: byName.get(name) });
+    }
+  }
+  return references;
+}
+
+function updateProxyReferences(proxies, references) {
+  const retained = new Set(proxies);
+  for (const { proxy, key, target } of references) {
+    if (!retained.has(proxy)) continue;
+    if (!retained.has(target)) throw new Error(`[重命名] 引用的前置节点被过滤：${target.name}`);
+    proxy[key] = target.name;
+  }
 }
 
 function dedupeNames(proxies, nameLength) {
@@ -1364,10 +1194,7 @@ function dedupeNames(proxies, nameLength) {
     do {
       count++;
       const suffix = `#${count}`;
-      candidate = `${truncateText(
-        base,
-        Math.max(0, nameLength - suffix.length)
-      )}${suffix}`;
+      candidate = `${truncateText(base, Math.max(0, nameLength - suffix.length))}${suffix}`;
     } while (used.has(candidate));
 
     counters.set(base, count);
@@ -1387,6 +1214,6 @@ function logStats(stats, outputCount) {
       `input=${stats.input} output=${outputCount} filtered=${filtered} ` +
       `hard_info=${stats.hardInfo} soft_info=${stats.softInfo} ` +
       `unknown=${stats.unknown} metadata=${stats.metadata} ` +
-      `renamed=${stats.renamed} elapsed=${elapsed}ms`
+      `renamed=${stats.renamed} elapsed=${elapsed}ms`,
   );
 }
