@@ -2,7 +2,7 @@
 
 面向 Sub-Store、Mihomo 的个人脚本与配置集合，包含节点重命名、分流覆写和 DNS 配置。
 
-所有脚本当前版本统一为 **1.0.0**。
+当前版本：**Override 1.0.1**；**NodeRename、CloudRename 1.0.0**。
 
 ## 使用入口
 

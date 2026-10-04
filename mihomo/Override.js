@@ -1,6 +1,6 @@
 /**
  * Kosuzu · Mihomo 配置覆写
- * 版本：1.0.0
+ * 版本：1.0.1
  *
  * 所有策略组均为 select；由用户选择并保存节点。
  * 直接修改本文件中的策略、地区和 DNS 配置。
@@ -177,7 +177,8 @@ function createKosuzuGroups(proxies, options) {
   const regionNames = regions.map((group) => group.name);
   const allNames = kosuzuUnique(proxies.map((node) => node.name));
   const landingExit = hasLanding ? ["落地节点"] : [];
-  const exits = kosuzuUnique(["选择代理", ...regionNames, ...landingExit, "备用选择", "DIRECT"]);
+  const primaryExits = ["选择代理", "备用选择"];
+  const exits = kosuzuUnique([...primaryExits, ...regionNames, ...landingExit, "DIRECT"]);
   const commonNames = new Set([
     "美国节点",
     "香港节点",
@@ -192,7 +193,11 @@ function createKosuzuGroups(proxies, options) {
     createKosuzuSelect("Final", [...exits, ...allNames], "Final"),
     ...regions.filter((group) => commonNames.has(group.name)),
     ...KOSUZU_SERVICES.map(([name, icon, preferred]) =>
-      createKosuzuSelect(name, exits.includes(preferred) ? [preferred, ...exits] : exits, icon),
+      createKosuzuSelect(
+        name,
+        exits.includes(preferred) ? [...primaryExits, preferred, ...exits] : exits,
+        icon,
+      ),
     ),
     ...regions.filter((group) => !commonNames.has(group.name)),
   ];

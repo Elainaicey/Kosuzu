@@ -4,7 +4,7 @@
 
 ## 使用方法
 
-[Override.js 的 Raw 地址](https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js)。当前版本为 `1.0.0`。
+[Override.js 的 Raw 地址](https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js)。当前版本为 `1.0.1`。
 
 Clash Party / Sparkle 中，将此地址添加为远程 **JS 覆写**，并将其绑定到当前订阅；更新覆写后重新应用该订阅。只更新 GitHub 文件不会自动改变已经生成的订阅 YAML。
 
@@ -31,6 +31,8 @@ Clash Party / Sparkle 中，将此地址添加为远程 **JS 覆写**，并将�
 其他地区优先排列英国、德国、荷兰、加拿大、法国、澳大利亚；辅助组放在最后。Meta 使用 [Dashboard Icons 的 Meta 图标](https://github.com/homarr-labs/dashboard-icons/blob/main/png/meta.png)。
 
 「备用选择」包含订阅中的全部节点。Final 包含所有显示的国家组、可用的落地组、备用选择、DIRECT 和每个单节点。国家组中直接列出对应节点，允许逐个选择。
+
+服务策略组和 Final 的候选项前两位固定为「选择代理 → 备用选择」。服务原有的优先出口（例如巴哈姆特的台湾节点）排在这两项之后。
 
 不生成自动测速、负载均衡、故障转移或低倍率分组。旧链接中的 `grouptype`、`loadbalance`、`regex` 不再控制组的行为。
 
