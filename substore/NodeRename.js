@@ -1,7 +1,7 @@
 /**
  * @Sub-Store-Page
  *
- * NodeRename v1.0.3
+ * NodeRename v1.0.0
  * 高性能落地出口检测与节点重命名脚本
  *
  * 默认输出：
@@ -73,7 +73,7 @@
  * 不等同于运营商或数据库的正式“原生 IP”认证。
  */
 
-const SCRIPT_VERSION = "1.0.3";
+const SCRIPT_VERSION = "1.0.0";
 const CACHE_KEY = "node_rename_cache_v1";
 const CACHE_SCHEMA = 2;
 const UNKNOWN = "未知";

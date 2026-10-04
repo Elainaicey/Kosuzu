@@ -9,7 +9,7 @@
 | [NodeRename.js](../substore/NodeRename.js) | 需要识别真实落地出口、ASN、IP 类型和原生/广播 | IPinfo、ipapi.is、Cloudflare Trace、RIPE | 信息更完整，支持缓存、批量查询和并发探测 |
 | [CloudRename.js](../substore/CloudRename.js) | 只根据节点名称和元数据快速整理节点 | 本地规则，无外部请求 | 运行快、零网络依赖，支持大量地区和线路标签 |
 
-当前版本：`NodeRename v1.0.3`、`CloudRename v1.1.3`。
+当前版本：`NodeRename v1.0.0`、`CloudRename v1.0.0`。
 
 ## NodeRename
 

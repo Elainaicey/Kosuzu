@@ -4,7 +4,7 @@
 
 ## 使用方法
 
-[Override.js 的 Raw 地址](https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js)。文件头的当前版本为 `2026.10.04.2`。
+[Override.js 的 Raw 地址](https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js)。当前版本为 `1.0.0`。
 
 Clash Party / Sparkle 中，将此地址添加为远程 **JS 覆写**，并将其绑定到当前订阅；更新覆写后重新应用该订阅。只更新 GitHub 文件不会自动改变已经生成的订阅 YAML。
 

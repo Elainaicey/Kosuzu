@@ -2,6 +2,8 @@
 
 面向 Sub-Store、Mihomo 的个人脚本与配置集合，包含节点重命名、分流覆写和 DNS 配置。
 
+所有脚本当前版本统一为 **1.0.0**。
+
 ## 使用入口
 
 | 文件 | 用途 | 说明 |
@@ -22,16 +24,20 @@ Sub-Store 节点重命名使用 `operator(proxies)`；Mihomo 配置覆写使用 
 
 ```text
 Kosuzu/
-├── substore/                 # 可直接使用的节点处理脚本
-│   ├── NodeRename.js
-│   └── CloudRename.js
-├── mihomo/
-│   ├── Override.js           # 可直接使用的合并覆写
+├── .gitattributes           # 文本换行规范
+├── README.md                # 项目入口与使用链接
+├── docs/                    # 使用与维护文档
+│   ├── mihomo.md
+│   └── substore.md
+├── mihomo/                  # Mihomo 配置覆写
+│   ├── Override.js
 │   └── LICENSE              # 基础规则的来源许可证
-└── docs/                     # 详细使用与维护说明
-    ├── substore.md
-    └── mihomo.md
+└── substore/                # Sub-Store 节点处理
+    ├── CloudRename.js
+    └── NodeRename.js
 ```
+
+三个脚本均可直接使用，分别在对应文件内维护，无需源码目录、构建脚本或依赖安装。
 
 ## 更新覆写
 

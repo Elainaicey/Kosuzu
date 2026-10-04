@@ -1,7 +1,7 @@
 /**
  * @Sub-Store-Page
  *
- * CloudRename v1.1.3
+ * CloudRename v1.0.0
  * 本地机场节点分类、信息提取与重命名脚本
  *
  * 输出格式：
@@ -45,7 +45,7 @@
  * #drop_info=1&mode=prefix&show_line=1&max_tags=24&show_rate=1&dedupe=1
  */
 
-const SCRIPT_VERSION = "1.1.3";
+const SCRIPT_VERSION = "1.0.0";
 
 const UNKNOWN_REGION = Object.freeze({
   code: "OT",
