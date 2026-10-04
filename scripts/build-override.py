@@ -67,6 +67,8 @@ def render_upstream(source):
 def build():
     upstream = (MIHOMO / "vendor/powerfullz/convert.js").read_text(encoding="utf-8-sig")
     cloud = (MIHOMO / "src/Emby.js").read_text(encoding="utf-8-sig")
+    regions = (MIHOMO / "src/Regions.js").read_text(encoding="utf-8-sig")
+    policies = (MIHOMO / "src/Policies.js").read_text(encoding="utf-8-sig")
     dns_source = (MIHOMO / "src/dns.yaml").read_text(encoding="utf-8-sig")
     data = yaml.safe_load(dns_source)
     if not isinstance(data, dict) or set(data) != {"dns"}:
@@ -85,7 +87,7 @@ def build():
     output = f'''/**
  * Kosuzu · Mihomo 配置覆写
  *
- * 执行顺序：上游分流 → Emby 补充 → 自定义 DNS。
+ * 执行顺序：上游分流 → Emby 补充 → 自定义策略与地区 → 自定义 DNS。
  * DNS 来源：mihomo/src/dns.yaml；不受 fakeip、ipv6 参数影响。
  * 重新生成：python scripts/build-override.py
  *
@@ -100,6 +102,7 @@ def build():
 
 function main(config) {{
   const result = applyCloudOverrides(powerfullzOverrideMain(config));
+  applyKosuzuPolicies(result);
   result.dns = createCustomDns();
   return result;
 }}
@@ -118,6 +121,14 @@ function createCustomDns() {{
 // -----------------------------------------------------------------------------
 
 {cloud_body}
+
+// -----------------------------------------------------------------------------
+// 自定义策略与国家识别 · mihomo/src/Policies.js、Regions.js
+// -----------------------------------------------------------------------------
+
+{policies.strip()}
+
+{regions.strip()}
 
 // -----------------------------------------------------------------------------
 // 上游分流 · mihomo/vendor/powerfullz/convert.js
@@ -151,7 +162,7 @@ if __name__ == "__main__":
     if args.check:
         if not OUTPUT.exists() or OUTPUT.read_text(encoding="utf-8") != result:
             raise SystemExit("Override.js is out of date; run python scripts/build-override.py")
-        print("mihomo/Override.js matches convert.js + Emby.js + dns.yaml")
+        print("mihomo/Override.js matches upstream + custom policies + regions + DNS")
     else:
         OUTPUT.write_text(result, encoding="utf-8", newline="\n")
         print(f"Built {OUTPUT.name}")
