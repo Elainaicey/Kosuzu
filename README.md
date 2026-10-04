@@ -35,7 +35,8 @@ Kosuzu/
 │       ├── convert.min.js
 │       └── LICENSE
 ├── scripts/
-│   └── build-override.py     # 生成合并覆写
+│   ├── build-override.py     # 生成并排版合并覆写
+│   └── requirements.txt      # 构建依赖
 └── docs/                     # 详细使用与维护说明
     ├── substore.md
     └── mihomo.md
@@ -46,7 +47,7 @@ Kosuzu/
 修改 `mihomo/src/` 中的 Emby 或 DNS 配置，或更新 `mihomo/vendor/powerfullz/` 中的上游文件后，在项目根目录运行：
 
 ```bash
-python -m pip install PyYAML
+python -m pip install -r scripts/requirements.txt
 python scripts/build-override.py
 python scripts/build-override.py --check
 ```

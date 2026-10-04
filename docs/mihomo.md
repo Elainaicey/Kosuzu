@@ -10,7 +10,7 @@
 
 合并脚本的执行顺序：
 
-1. 内嵌的 [convert.min.js](../mihomo/vendor/powerfullz/convert.min.js) 生成分组、分流规则、嗅探和 TUN 设置。
+1. 内嵌的 [convert.js](../mihomo/vendor/powerfullz/convert.js) 生成分组、分流规则、嗅探和 TUN 设置。
 2. [Emby.js](../mihomo/src/Emby.js) 添加 Emby 分组及规则集，并将 Emby 规则插入 GFWList 等兜底规则之前。
 3. [dns.yaml](../mihomo/src/dns.yaml) 的完整 `dns` 对象替换 DNS，不保留上游 fallback 或订阅中的 DNS 策略。
 
@@ -35,15 +35,17 @@ DNS 严格使用自定义配置：
 
 自定义来源位于 `mihomo/src/`。其中 `Emby.js` 是原来的 `Cloud.js`，文件名按用途调整。
 
-上游文件位于 `mihomo/vendor/powerfullz/`。`convert.js` 是未压缩构建产物，`convert.min.js` 是压缩产物；真正的源码位于[上游项目](https://github.com/powerfullz/override-rules)的 `src/*.ts`。当前生成器使用本地 `convert.min.js`，上游更新需手动下载后重新生成。
+上游文件位于 `mihomo/vendor/powerfullz/`。`convert.js` 是未压缩构建产物，`convert.min.js` 是压缩产物；真正的源码位于[上游项目](https://github.com/powerfullz/override-rules)的 `src/*.ts`。生成器使用可读的 `convert.js`，保留有含义的函数名和变量名，再统一排版。上游更新需手动下载后重新生成。
 
 在项目根目录执行：
 
 ```bash
-python -m pip install PyYAML
+python -m pip install -r scripts/requirements.txt
 python scripts/build-override.py
 python scripts/build-override.py --check
 node --check mihomo/Override.js
 ```
 
-生成器读取上游脚本、Emby 脚本、DNS YAML 和上游授权声明，写入 `mihomo/Override.js`。生成文件含来源路径及内容校验值，使用成品不需要 Python。请修改来源文件后重新生成，避免直接修改生成文件。
+生成文件按“配置入口 → 自定义 DNS → Emby 分组与规则 → 上游分流”排列，统一使用两个空格缩进。DNS 按用途分段，上游代码保留模块标记；授权全文放在 `mihomo/vendor/powerfullz/LICENSE`，脚本头部只保留简短来源说明。
+
+生成器读取上游脚本、Emby 脚本和 DNS YAML，写入并格式化 `mihomo/Override.js`。`--check` 检查内容和排版是否与来源一致。使用成品不需要 Python；请修改来源文件后重新生成，避免直接修改生成文件。

@@ -1,0 +1,2 @@
+PyYAML==6.0.3
+jsbeautifier==2.0.3
