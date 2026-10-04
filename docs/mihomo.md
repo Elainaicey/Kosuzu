@@ -47,7 +47,7 @@ PayPal、Meta、Discord、游戏平台使用 [MetaCubeX/meta-rules-dat](https://
 
 具体业务优先于静态 CDN，CDN 位于 GFWList 之前。所有下载的规则集均有对应分流规则。
 
-[dns.yaml](../mihomo/src/dns.yaml) 的完整 `dns` 对象直接写入最终配置，不继承输入配置的 DNS；保持 fake-ip 和 `dns.ipv6: false`。TUN 独立控制。
+自定义 DNS 完整保存在 `Override.js` 的 `createCustomDns()` 中，不继承输入配置的 DNS；保持 fake-ip 和 `dns.ipv6: false`。TUN 独立控制。
 
 ## 参数与地区识别
 
@@ -57,7 +57,7 @@ Sub-Store 链接可追加参数，例如：
 https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js#threshold=1&tun=true
 ```
 
-支持 `threshold`、`quic`、`tun`、`full`、`ipv6`、`keepalive`。默认 `threshold=1`，一个节点即可显示国家组；显式设置 `threshold=2` 则要求至少两个节点。布尔参数默认关闭。`full=true` 生成完整基础设置；`ipv6` 和 `keepalive` 影响完整配置，DNS 始终使用 YAML 中的值。
+支持 `threshold`、`quic`、`tun`、`full`、`ipv6`、`keepalive`。默认 `threshold=1`，一个节点即可显示国家组；显式设置 `threshold=2` 则要求至少两个节点。布尔参数默认关闭。`full=true` 生成完整基础设置；`ipv6` 和 `keepalive` 影响完整配置，DNS 始终使用自定义对象中的值。
 
 支持 61 个国家与地区，识别优先级为旗帜 → 较长的国家/城市名称 → 独立代码。荷兰支持 `🇳🇱`、`荷兰`、`荷蘭`、`Netherlands`、`Amsterdam`、`AMS`、`NL01`、`nl_01` 等写法。`in`、`it`、`no` 等易与普通英文混淆的短代码要求大写或带编号。
 
@@ -65,15 +65,22 @@ https://raw.githubusercontent.com/Elainaicey/Kosuzu/main/mihomo/Override.js#thre
 
 ## 维护
 
-来源位于 `mihomo/src/`：`Policies.js` 定义最终分组与规则，`Regions.js` 负责国家识别及排序，`Settings.js` 定义运行设置，`Emby.js` 定义 Emby 规则源，`dns.yaml` 为自定义 DNS。
+直接维护 [Override.js](../mihomo/Override.js)，所有内容按章节排列：
 
-生成器只合并上述来源并统一排版，不内嵌上游整包、不先生成旧组再删除。上游下载的 `convert.js`、`convert.min.js` 已移除；基础规则参考 [powerfullz/override-rules](https://github.com/powerfullz/override-rules)，保留其 [MIT 许可证](../mihomo/vendor/powerfullz/LICENSE)。上游更新不会自动改写本项目的分组逻辑，远程规则集仍按配置更新。
+| 内容 | 修改位置 |
+| --- | --- |
+| DNS | `createCustomDns()` |
+| 服务组与图标 | `KOSUZU_SERVICES` |
+| 策略组候选与顺序 | `createKosuzuGroups()` |
+| 分流规则与规则源 | `createKosuzuRules()`、`createKosuzuProviders()` |
+| 国家识别与顺序 | `KOSUZU_REGIONS`、`KOSUZU_REGION_ORDER` |
+| Emby 规则 | `createEmbyProviders()`、`createEmbyRules()` |
+| 参数、嗅探、TUN | `createKosuzuOptions()`、`createKosuzuRuntime()` |
+
+基础规则参考 [powerfullz/override-rules](https://github.com/powerfullz/override-rules)，保留其 [MIT 许可证](../mihomo/LICENSE)。上游更新不会自动改写本项目的分组逻辑，远程规则集仍按配置更新。
 
 ```bash
-python -m pip install -r scripts/requirements.txt
-python scripts/build-override.py
-python scripts/build-override.py --check
 node --check mihomo/Override.js
 ```
 
-构建时检查禁用的旧组和切换逻辑是否残留，以及顶层函数是否被使用。使用成品不需要 Python；修改来源后重新生成。
+保存文件并推送后，在客户端更新覆写并重新应用订阅。项目不再保留重复来源文件、生成器或构建依赖。

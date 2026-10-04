@@ -27,17 +27,7 @@ Kosuzu/
 │   └── CloudRename.js
 ├── mihomo/
 │   ├── Override.js           # 可直接使用的合并覆写
-│   ├── src/                  # 自定义覆写来源
-│   │   ├── Emby.js
-│   │   ├── Policies.js       # 策略组、候选出口与规则顺序
-│   │   ├── Regions.js        # 国家与地区识别
-│   │   ├── Settings.js       # 参数、嗅探、TUN 与 Geo 数据
-│   │   └── dns.yaml
-│   └── vendor/powerfullz/
-│       └── LICENSE          # 基础规则的来源许可证
-├── scripts/
-│   ├── build-override.py     # 生成并排版合并覆写
-│   └── requirements.txt      # 构建依赖
+│   └── LICENSE              # 基础规则的来源许可证
 └── docs/                     # 详细使用与维护说明
     ├── substore.md
     └── mihomo.md
@@ -45,28 +35,16 @@ Kosuzu/
 
 ## 更新覆写
 
-修改 `mihomo/src/` 中的策略、地区、运行设置、Emby 或 DNS 配置后，在项目根目录运行：
-
-```bash
-python -m pip install -r scripts/requirements.txt
-python scripts/build-override.py
-python scripts/build-override.py --check
-```
-
-客户端只需加载生成后的 `mihomo/Override.js`，运行时无需 Python，也无需单独加载来源文件。
+直接修改 `mihomo/Override.js`。策略组、国家识别、Emby、DNS 和运行设置在同一个文件内按章节排列，无需构建。保存并推送后，在客户端更新已绑定的覆写并重新应用订阅。
 
 ## 本地检查
 
 ```bash
 node --check substore/NodeRename.js
 node --check substore/CloudRename.js
-node --check mihomo/src/Emby.js
-node --check mihomo/src/Policies.js
-node --check mihomo/src/Regions.js
-node --check mihomo/src/Settings.js
 node --check mihomo/Override.js
 ```
 
 ## 来源
 
-Mihomo 覆写基于 [powerfullz/override-rules](https://github.com/powerfullz/override-rules)，上游代码遵循 [MIT License](./mihomo/vendor/powerfullz/LICENSE)。自定义 DNS 使用 [mihomo/src/dns.yaml](./mihomo/src/dns.yaml)。
+Mihomo 覆写基于 [powerfullz/override-rules](https://github.com/powerfullz/override-rules)，保留其 [MIT License](./mihomo/LICENSE)。自定义 DNS 已完整合并到 `Override.js` 的 `createCustomDns()` 中。
