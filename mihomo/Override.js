@@ -177,7 +177,7 @@ function createKosuzuGroups(proxies, options) {
   const regionNames = regions.map((group) => group.name);
   const allNames = kosuzuUnique(proxies.map((node) => node.name));
   const landingExit = hasLanding ? ["落地节点"] : [];
-  const primaryExits = ["选择代理", "备用选择"];
+  const primaryExits = ["选择代理", "备选代理"];
   const exits = kosuzuUnique([...primaryExits, ...regionNames, ...landingExit, "DIRECT"]);
   const commonNames = new Set([
     "美国节点",
@@ -188,9 +188,9 @@ function createKosuzuGroups(proxies, options) {
     "韩国节点",
   ]);
   const groups = [
-    createKosuzuSelect("选择代理", [...landingExit, ...regionNames, "备用选择", "DIRECT"], "Proxy"),
-    createKosuzuSelect("备用选择", allNames, "Available_1"),
-    createKosuzuSelect("Final", [...exits, ...allNames], "Final"),
+    createKosuzuSelect("选择代理", ["DIRECT", ...landingExit, ...regionNames], "Proxy"),
+    createKosuzuSelect("备选代理", ["DIRECT", ...allNames], "Available_1"),
+    createKosuzuSelect("Final", [...primaryExits, "DIRECT", ...regionNames, ...landingExit], "Final"),
     ...regions.filter((group) => commonNames.has(group.name)),
     ...KOSUZU_SERVICES.map(([name, icon, preferred]) =>
       createKosuzuSelect(
